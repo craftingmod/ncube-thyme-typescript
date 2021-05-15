@@ -13,7 +13,7 @@ import { M2M_Header } from "./onem2m/m2m_header"
 import { M2M_Keys } from "./onem2m/m2m_key"
 import { M2M_Type } from "./onem2m/m2m_type"
 
-const debug = Debug("nCube")
+const debug = Debug("Thyme")
 const maxBufferSize = 16384
 const APIVER = "0.2.481.2.0001.001.000111"
 
