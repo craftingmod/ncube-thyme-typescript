@@ -1,6 +1,7 @@
 import Chalk from "chalk"
 import Debug from "debug"
 import got, { Response } from "got"
+import shortid from "shortid"
 
 import { M2M_AERes } from "./onem2m/m2m_ae"
 import { M2MError } from "./onem2m/m2m_base"
@@ -16,36 +17,24 @@ const debug = Debug("nCube")
 const maxBufferSize = 16384
 const APIVER = "0.2.481.2.0001.001.000111"
 
-const m2m_cb_header:M2M_Header = {
-  "Accept": "application/json",
-  "X-M2M-Origin": "SOrigin",
-  "X-M2M-RI": 12345,
-}
-// Application Entity
-const m2m_ae_header:M2M_Header = {
-  "Accept": "application/json",
-  "X-M2M-Origin": "S",
-  "X-M2M-RI": 12345,
-}
 const m2m_ae_basebody = {
   api: APIVER,
   lbl: ["key1", "key2"],
   rr: true,
 }
-// Container
-const m2m_cnt_header:M2M_Header = {
-  "Accept": "application/json",
-  "X-M2M-Origin": "",
-  "X-M2M-RI": 12345,
-}
-const m2m_cin_header = m2m_cnt_header
+
 export class Thyme {
   private pointOfAccess:string[]
   private options:ThymeOption
   private cseBase:string
+  private m2mBaseHeader:M2M_Header
   public constructor(base:string, options:ThymeOption) {
     this.options = options
     this.cseBase = base
+    this.m2mBaseHeader = {
+      "Accept": "application/json",
+      "X-M2M-RI": `thyme/${shortid()}`,
+    }
     if (this.options.protocol == null) {
       this.options.protocol = "http"
     }
@@ -60,7 +49,10 @@ export class Thyme {
     const cseBaseRes = await this.request<M2M_CBRes>(
       PostType.GET,
       [this.cseBase],
-      m2m_cb_header,
+      {
+        ...this.m2mBaseHeader,
+        "X-M2M-Origin": "SOrigin",
+      },
     )
     const cseBase = cseBaseRes.response[M2M_Keys.cseBase]
     if (cseBase.rn != this.cseBase) {
@@ -83,7 +75,8 @@ export class Thyme {
       PostType.POST,
       [this.cseBase],
       {
-        ...m2m_ae_header,
+        ...this.m2mBaseHeader,
+        "X-M2M-Origin": "S",
         "Content-Type": genContentType(M2M_Type.ApplicationEntity),
       },
       {
@@ -119,7 +112,7 @@ export class Thyme {
       PostType.DELETE,
       [this.cseBase, resName],
       {
-        ...m2m_ae_header,
+        ...this.m2mBaseHeader,
         "X-M2M-Origin": "Superman", // Permission?
       }
     )
@@ -144,7 +137,7 @@ export class Thyme {
       PostType.GET,
       [this.cseBase, resourceName],
       {
-        ...m2m_ae_header,
+        ...this.m2mBaseHeader,
         "X-M2M-Origin": resourceName, // Permission again?
       }
     )
@@ -199,7 +192,7 @@ export class Thyme {
       PostType.POST,
       [this.cseBase, ae.resourceName],
       {
-        ...m2m_cnt_header,
+        ...this.m2mBaseHeader,
         "X-M2M-Origin": ae.aei,
         "Content-Type": genContentType(M2M_Type.Container),
       },
@@ -235,7 +228,7 @@ export class Thyme {
       PostType.DELETE,
       [this.cseBase, ae.resourceName, conName],
       {
-        ...m2m_cnt_header,
+        ...this.m2mBaseHeader,
         "X-M2M-Origin": ae.aei,
       }
     )
@@ -261,7 +254,7 @@ export class Thyme {
       PostType.GET,
       [this.cseBase, ae.resourceName, containerName],
       {
-        ...m2m_cnt_header,
+        ...this.m2mBaseHeader,
         "X-M2M-Origin": "SOrigin",
       }
     )
@@ -317,7 +310,7 @@ export class Thyme {
       PostType.POST,
       [this.cseBase, ae.resourceName, container.resourceName],
       {
-        ...m2m_cin_header,
+        ...this.m2mBaseHeader,
         "X-M2M-Origin": ae.aei,
         "Content-Type": genContentType(M2M_Type.ContentInstance),
       },
@@ -350,7 +343,7 @@ export class Thyme {
       PostType.GET,
       [this.cseBase, ae.resourceName, container.resourceName, "latest"],
       {
-        ...m2m_cin_header,
+        ...this.m2mBaseHeader,
         "X-M2M-Origin": "SOrigin",
       }
     )
