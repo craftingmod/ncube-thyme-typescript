@@ -37,7 +37,7 @@
     "reset-hard": "git clean -dfx && git reset --hard && npm i",
     "prepare-release": "run-s reset-hard test cov:check doc:html version doc:publish",
     "set-debug": "export DEBUG=*",
-    "install": "tsc -p tsconfig.json"
+    "prepare": "npm run build"
   },
   "engines": {
     "node": ">=10"
