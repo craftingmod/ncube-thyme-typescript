@@ -338,6 +338,12 @@ export class Thyme {
       container,
     }
   }
+  /**
+   * Query last ContentInstance value
+   * @param container Container
+   * @returns last `value` (string)
+   * @throws There isn't any ContentInstance value
+   */
   public async queryLastContentInstance(container:Container):Promise<ContentInstance> {
     const ae = container.parentAE
     const queryCinRes = await this.request<M2M_CINRes>(
@@ -359,8 +365,15 @@ export class Thyme {
       container,
     }
   }
-
   
+  /**
+   * Raw request to Mobius server and receive them.
+   * @param type HTTP Type (@todo support other protocol)
+   * @param suburls The array of url which will be postfix (ex: `mobius`/`mynewapp`/`led`)
+   * @param header M2M Header + Custom header to send
+   * @param body The JSON body which will send
+   * @returns Response with type `T`
+   */
   public async request<T>(type:PostType, suburls:string[], header:M2M_Header | Record<string, unknown>, body?:Record<string, unknown>):Promise<ResponsePair<T>> {
     if (this.options.protocol == "http") {
       const url = `${this.options.secure ? "https" : "http"}://${this.options.host}:${this.options.port}/${suburls.join("/")}`
@@ -430,7 +443,7 @@ export interface ThymeOption {
   host:string,
   port:number,
   protocol?:"http", // @todo support websocket, coap, mqtt
-  secure?:boolean
+  secure?:false // @todo secure connection..
 }
 
 interface ResponsePair<T> {
