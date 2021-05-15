@@ -1,7 +1,7 @@
 {
   "compilerOptions": {
     "incremental": true,
-    "target": "es2020",
+    "target": "ES2020",
     "outDir": "dist",
     "rootDir": "src",
     "moduleResolution": "node",
@@ -10,6 +10,8 @@
     "inlineSourceMap": true,
     "esModuleInterop": true /* Enables emit interoperability between CommonJS and ES Modules via creation of namespace objects for all imports. Implies 'allowSyntheticDefaultImports'. */,
     "resolveJsonModule": true /* Include modules imported with .json extension. */,
+    "allowSyntheticDefaultImports": true,
+    "tsBuildInfoFile": "./dist/buildcache.tsbuildinfo",
 
     // "strict": true /* Enable all strict type-checking options. */,
 
@@ -37,7 +39,7 @@
     // "experimentalDecorators": true /* Enables experimental support for ES7 decorators. */,
     // "emitDecoratorMetadata": true /* Enables experimental support for emitting type metadata for decorators. */,
 
-    "lib": ["es2020"],
+    "lib": ["ES2020"],
     "types": ["node"],
     "typeRoots": ["node_modules/@types", "src/types"]
   },
