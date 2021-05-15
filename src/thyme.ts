@@ -39,11 +39,11 @@ const m2m_cnt_header:M2M_Header = {
   "X-M2M-RI": 12345,
 }
 const m2m_cin_header = m2m_cnt_header
-export class nCube {
+export class Thyme {
   private pointOfAccess:string[]
-  private options:nCubeOption
+  private options:ThymeOption
   private cseBase:string
-  public constructor(base:string, options:nCubeOption) {
+  public constructor(base:string, options:ThymeOption) {
     this.options = options
     this.cseBase = base
     if (this.options.protocol == null) {
@@ -426,7 +426,7 @@ export interface ContentInstance extends Readonly<Resource> {
   readonly value:string,
 }
 
-export interface nCubeOption {
+export interface ThymeOption {
   host:string,
   port:number,
   protocol?:"http", // @todo support websocket, coap, mqtt

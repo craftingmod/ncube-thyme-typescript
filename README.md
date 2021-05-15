@@ -13,33 +13,33 @@ $ npm i -S ncube-thyme-typescript
 ###### Connect
 
 ```typescript
-import { nCube } from 'ncube-thyme-typescript';
+import { Thyme } from 'ncube-thyme-typescript';
 
-const cube = new nCube('Mobius', {
+const thyme = new Thyme('Mobius', {
   host: 'localhost',
   port: 7579,
   protocol: 'http',
 });
 
-await cube.connect(); // in async function
+await thyme.connect(); // in async function
 ```
 
 ###### Create Application Entity (Group)
 
 ```typescript
-const cameraAE = await cube.ensureApplicationEntity('camera_sample');
+const cameraAE = await thyme.ensureApplicationEntity('camera_sample');
 ```
 
 ###### Create Container (Sensor)
 
 ```typescript
-const people = await cube.ensureContainer(cameraAE, 'people');
+const people = await thyme.ensureContainer(cameraAE, 'people');
 ```
 
 ###### Set ContentInstance (Sensor Value)
 
 ```typescript
-const count = await cube.addContentInstance(people, '5300');
+const count = await thyme.addContentInstance(people, '5300');
 console.log(count.value); // 5300
 ```
 

@@ -1,1 +1,1 @@
-export * from "./ncube"
+export * from "./thyme"

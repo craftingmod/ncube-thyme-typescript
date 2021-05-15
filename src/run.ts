@@ -1,20 +1,18 @@
-import { nCube } from "./ncube"
-
-console.log("Hello World")
+import { Thyme } from "./index"
 
 async function main() {
-  const cube = new nCube("Mobius", {
+  const thyme = new Thyme("Mobius", {
     host: "203.253.128.177",
     port: 7579,
     protocol: "http",
   });
-  await cube.connect()
+  await thyme.connect()
   // create Application Entity
-  const myAE = await cube.ensureApplicationEntity("ncube_ts_sample")
+  const myAE = await thyme.ensureApplicationEntity("ncube_ts_sample")
   // create Container
-  const light = await cube.ensureContainer(myAE, "light")
-  await cube.addContentInstance(light, "126788")
-  console.log(`Sensor: ${(await cube.queryLastContentInstance(light)).value}`)
+  const light = await thyme.ensureContainer(myAE, "light")
+  await thyme.addContentInstance(light, "126788")
+  console.log(`Sensor: ${(await thyme.queryLastContentInstance(light)).value}`)
 }
 
 main()
