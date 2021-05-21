@@ -9,9 +9,7 @@ import { DateString, M2M_Type } from "./m2m_type";
 export interface M2M_CNT extends M2MBase {
   ty: M2M_Type.Container,
   /**
-   * unknown.
-   * 
-   * @todo fill
+   * Expire Time
    */
   et: unknown | DateString,
   /**

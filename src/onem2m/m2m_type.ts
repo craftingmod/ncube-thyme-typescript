@@ -14,7 +14,11 @@ export enum M2M_Type {
   /**
    * CSE(Common Service Entity) Base
    */ 
-  CSEBase = 5
+  CSEBase = 5,
+  /**
+   * Subscribe
+   */
+  Subscribe = 23,
 }
 
 export type DateString = string

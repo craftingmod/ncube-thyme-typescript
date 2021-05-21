@@ -16,11 +16,9 @@ export interface M2M_CIN extends M2MBase {
   st: unknown | number,
 
   /**
-   * unknown.
-   * 
-   * @todo fill
+   * Expire Time
    */
-  et: unknown | DateString,
+  et: DateString,
   /**
    * ConsistencyStrategy?
    */

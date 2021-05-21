@@ -1,6 +1,7 @@
 import Chalk from "chalk"
 import Debug from "debug"
 import got, { Response } from "got"
+import mqtt from "mqtt"
 import shortid from "shortid"
 
 import { M2M_AERes } from "./onem2m/m2m_ae"
@@ -11,9 +12,11 @@ import { M2M_CNTRes } from "./onem2m/m2m_cnt"
 import { resNotExists } from "./onem2m/m2m_debug"
 import { M2M_Header } from "./onem2m/m2m_header"
 import { M2M_Keys } from "./onem2m/m2m_key"
+import { M2M_SUB, M2M_SUBRes } from "./onem2m/m2m_sub"
 import { M2M_Type } from "./onem2m/m2m_type"
 
-const debug = Debug("Thyme")
+const debugMain = Debug("Thyme:main")
+const debugSub = Debug("Thyme:sub")
 const maxBufferSize = 16384
 const APIVER = "0.2.481.2.0001.001.000111"
 
@@ -28,38 +31,53 @@ export class Thyme {
   private options:ThymeOption
   private cseBase:string
   private m2mBaseHeader:M2M_Header
+  private mqttClient:mqtt.Client
+  private subAEList:string[]
   public constructor(base:string, options:ThymeOption) {
     this.options = options
     this.cseBase = base
+    this.subAEList = []
     this.m2mBaseHeader = {
       "Accept": "application/json",
       "X-M2M-RI": `thyme/${shortid()}`,
-    }
-    if (this.options.protocol == null) {
-      this.options.protocol = "http"
-    }
-    if (this.options.secure == null) {
-      this.options.secure = false
     }
     if (this.options.host.endsWith("/")) {
       this.options.host = this.options.host.substring(0, this.options.host.length - 1)
     }
   }
   public async connect() {
+    // check CSEBase Match
     const cseBaseRes = await this.request<M2M_CBRes>(
       PostType.GET,
       [this.cseBase],
       {
         ...this.m2mBaseHeader,
-        "X-M2M-Origin": "SOrigin",
+        "X-M2M-Origin": `S`,
       },
     )
     const cseBase = cseBaseRes.response[M2M_Keys.cseBase]
     if (cseBase.rn != this.cseBase) {
       throw new Error(`CSEBase does not match to ${this.cseBase}!`)
     }
-    debug(`${Chalk.green(`${this.options.host}:${this.options.port}`)} is connected with ${Chalk.gray("CSEBase")} ${Chalk.redBright(cseBase.rn)}`)
-    this.pointOfAccess = cseBase.poa 
+    debugMain(`${Chalk.gray("[HTTP]")} ${Chalk.green(this.options.host)} is connected with ${Chalk.gray("CSEBase")} ${Chalk.redBright(cseBase.rn)}`)
+    this.pointOfAccess = cseBase.poa
+    // check mqtt
+    this.mqttClient = mqtt.connect(`mqtt://${this.options.host}:${this.options.mqtt.port}`)
+    try {
+      await new Promise<void>((res, rej) => {
+        const cancel = setTimeout(() => rej("Timeout"), 2000)
+        this.mqttClient.on("connect", () => {
+          clearTimeout(cancel)
+          res()
+        })
+      })
+      debugSub(`${Chalk.gray("[MQTT]")} ${Chalk.green(this.options.host)} is connected.`)
+      // add content
+      this.mqttClient.on("message", this.mqttCallback)
+    } catch (err) {
+      console.log(`${Chalk.gray("[MQTT]")} ${Chalk.red(this.options.host)} failed to connect mqtt. Sub won't work.`)
+      this.mqttClient = null
+    }
   }
   /**
    * Create AE(Application Entity).
@@ -88,14 +106,16 @@ export class Thyme {
       }
     )
     const response = createAERes.response[M2M_Keys.applicationEntity]
-    debug(`${Chalk.blueBright("Application Entity")} ${Chalk.green(response.rn)
-      } has been ${Chalk.greenBright("created")} with id ${Chalk.blue(response.aei)}`)
-    return {
+    const out:ApplicationEntity = {
       type: M2M_Type.ApplicationEntity,
       resourceName: response.rn,
       resourceId: response.ri,
       aei: response.aei,
     }
+    this.ensureSubscribeAE(out.resourceName)
+    debugMain(`${this.getDeclaredName(out)} with id ${Chalk.yellow(response.aei)
+      } has been ${Chalk.greenBright("created")}.`)
+    return out
   }
   /**
    * Delete `AE`(Application Entity).
@@ -117,14 +137,14 @@ export class Thyme {
       }
     )
     const response = deleteAERes.response[M2M_Keys.applicationEntity]
-    debug(`${Chalk.blueBright("Application Entity")} ${Chalk.green(response.rn)
-      } has been ${Chalk.redBright("removed")} with id ${Chalk.blue(response.aei)}`)
-    return {
+    const out:ApplicationEntity = {
       type: M2M_Type.ApplicationEntity,
       resourceName: response.rn,
       resourceId: response.ri,
       aei: response.aei,
     }
+    debugMain(`${this.getDeclaredName(out)} with id ${Chalk.blue(response.aei)} has been ${Chalk.redBright("removed")}.`)
+    return out
   }
   /**
    * Query `AE`(Application Entity) and return `AE` info.
@@ -138,7 +158,7 @@ export class Thyme {
       [this.cseBase, resourceName],
       {
         ...this.m2mBaseHeader,
-        "X-M2M-Origin": resourceName, // Permission again?
+        "X-M2M-Origin": `S${resourceName}`, // Permission again?
       }
     )
     const response = queryAERes.response[M2M_Keys.applicationEntity]
@@ -174,6 +194,7 @@ export class Thyme {
       if (cleanup != null && cleanup) {
         await this.deleteApplicationEntity(ae)
       } else {
+        this.ensureSubscribeAE(ae.resourceName)
         return ae
       }
     }
@@ -205,14 +226,14 @@ export class Thyme {
       }
     )
     const response = createCntRes.response[M2M_Keys.container]
-    debug(`${Chalk.yellowBright("Container")} ${Chalk.green(response.rn)
-      } has been ${Chalk.greenBright("created")} in ${Chalk.blue(ae.resourceName)} (AE)`)
-    return {
+    const out:Container = {
       type: M2M_Type.Container,
       resourceName: response.rn,
       resourceId: response.ri,
       parentAE: ae, // immutable
     }
+    debugMain(`${this.getDeclaredName(out)} has been ${Chalk.greenBright("created")}.`)
+    return out
   }
   /**
    * Delete Container in `ae` or just container
@@ -233,14 +254,14 @@ export class Thyme {
       }
     )
     const response = deleteCntRes.response[M2M_Keys.container]
-    debug(`${Chalk.yellowBright("Container")} ${Chalk.green(response.rn)
-      } has been ${Chalk.redBright("removed")} in ${Chalk.blue(ae.resourceName)} (AE)`)
-    return {
+    const out:Container = {
       type: M2M_Type.Container,
       resourceName: response.rn,
       resourceId: response.ri,
       parentAE: ae, // immutable
     }
+    debugMain(`${this.getDeclaredName(out)} has been ${Chalk.redBright("removed")}.`)
+    return out
   }
   /**
    * Query `CNT`(Container) and return Container info.
@@ -255,7 +276,7 @@ export class Thyme {
       [this.cseBase, ae.resourceName, containerName],
       {
         ...this.m2mBaseHeader,
-        "X-M2M-Origin": "SOrigin",
+        "X-M2M-Origin": `S${ae.resourceName}`,
       }
     )
     const response = queryCntRes.response[M2M_Keys.container]
@@ -321,15 +342,15 @@ export class Thyme {
       }
     )
     const response = createCinRes.response[M2M_Keys.contentInstance]
-    debug(`${Chalk.yellowBright("Container")} ${Chalk.green(container.resourceName)
-      }'s value has been ${Chalk.yellow("updated")} to ${Chalk.cyanBright(response.con)} in ${Chalk.blue(ae.resourceName)} (AE)`)
-    return {
+    const out:ContentInstance = {
       type: M2M_Type.ContentInstance,
       resourceName: response.rn,
       resourceId: response.ri,
       value: response.con,
       container,
     }
+    debugMain(`${this.getDeclaredName(out)} has been updated to ${Chalk.cyanBright(response.con)}.`)
+    return out
   }
   /**
    * Query last ContentInstance value
@@ -344,18 +365,96 @@ export class Thyme {
       [this.cseBase, ae.resourceName, container.resourceName, "latest"],
       {
         ...this.m2mBaseHeader,
-        "X-M2M-Origin": "SOrigin",
+        "X-M2M-Origin": `S${ae.resourceName}`,
       }
     )
     const response = queryCinRes.response[M2M_Keys.contentInstance]
-    debug(`${Chalk.yellowBright("Container")} ${Chalk.green(container.resourceName)
-    }'s value is ${Chalk.cyanBright(response.con)} in ${Chalk.blue(ae.resourceName)} (AE)`)
-    return {
+    const out:ContentInstance = {
       type: M2M_Type.ContentInstance,
       resourceName: response.rn,
       resourceId: response.ri,
       value: response.con,
       container,
+    }
+    debugMain(`${this.getDeclaredName(out)} is ${Chalk.cyanBright(response.con)}.`)
+    return out
+  }
+  /**
+   * Subscribe container.
+   * @param container Container
+   * @param subscribeName subscribe name
+   * @returns subscribe data?
+   */
+  public async subscribeContainer(container:Container, subscribeName:string):Promise<SubscribeData> {
+    const ae = container.parentAE
+    let response:M2M_SUB
+    try {
+      const subExistRes = await this.request<M2M_SUBRes>(
+        PostType.GET,
+        [this.cseBase, ae.resourceName, container.resourceName, subscribeName],
+        {
+          ...this.m2mBaseHeader,
+          "X-M2M-Origin": `S${ae.resourceName}`,
+        }
+      )
+      response = subExistRes.response[M2M_Keys.subscribe]
+    } catch (err) {
+      if (err instanceof M2MError && err.debugLog == resNotExists) {
+        const createSubRes = await this.request<M2M_SUBRes>(
+          PostType.POST,
+          [this.cseBase, ae.resourceName, container.resourceName],
+          {
+            ...this.m2mBaseHeader,
+            "X-M2M-Origin": `S${ae.resourceName}`,
+            "Content-Type": genContentType(M2M_Type.Subscribe),
+          },
+          {
+            "m2m:sub": {
+              rn: subscribeName,
+              enc: {
+                net: [1,2,3,4]
+              },
+              nu: [
+                `mqtt://${this.options.host}:${this.options.mqtt.port}/S${ae.resourceName}?ct=json`
+              ],
+              exc: 10,
+            }
+          }
+        )
+        response = createSubRes.response[M2M_Keys.subscribe]
+      } else {
+        throw err
+      }
+    }
+    // code
+    debugSub(`${this.getDeclaredName(container)} is ${Chalk.greenBright("subscribed")}.`)
+    return {
+      type: M2M_Type.Subscribe,
+      resourceName: response.rn,
+      resourceId: response.ri,
+      container,
+      notiURL: response.nu[0],
+    }
+  }
+
+  public async unsubscribeContainer(container:Container, subscribeName:string):Promise<SubscribeData> {
+    const ae = container.parentAE
+    const deleteCntRes = await this.request<M2M_SUBRes>(
+      PostType.DELETE,
+      [this.cseBase, ae.resourceName, container.resourceName, subscribeName],
+      {
+        ...this.m2mBaseHeader,
+        "X-M2M-Origin": `S${ae.resourceName}`,
+      }
+    )
+    const response = deleteCntRes.response[M2M_Keys.subscribe]
+    debugSub(`${this.getDeclaredName(container)} is ${Chalk.redBright("unsubscribed")}.`)
+    return {
+      type: M2M_Type.Subscribe,
+      resourceName: response.rn,
+      resourceId: response.ri,
+      container,
+      notiURL: response.nu[0],
     }
   }
   
@@ -368,8 +467,8 @@ export class Thyme {
    * @returns Response with type `T`
    */
   public async request<T>(type:PostType, suburls:string[], header:M2M_Header | Record<string, unknown>, body?:Record<string, unknown>):Promise<ResponsePair<T>> {
-    if (this.options.protocol == "http") {
-      const url = `${this.options.secure ? "https" : "http"}://${this.options.host}:${this.options.port}/${suburls.join("/")}`
+    if (this.options.main == "http") {
+      const url = `${/*this.options.http.secure === true ? "https" : */"http"}://${this.options.host}:${this.options.http.port}/${suburls.join("/")}`
       let response:Response<unknown>
       if (type == PostType.GET) {
         response = await got.get(url, {
@@ -405,6 +504,52 @@ export class Thyme {
       throw new Error("Not implemented yet.")
     }
   }
+
+  protected async mqttCallback(topic:string, message:Buffer) {
+    const json = message.toString()
+    debugSub(`${Chalk.yellow(`[${topic}]`)} ${message.toString()}`)
+  }
+  
+  protected getDeclaredName(entity:ApplicationEntity | Container | ContentInstance) {
+    if (entity.type === M2M_Type.ApplicationEntity) {
+      return `${Chalk.blue(entity.resourceName)}${Chalk.gray("(AE)")}`
+    } else if (entity.type === M2M_Type.Container) {
+      return `${Chalk.green(entity.resourceName)}${Chalk.gray("(CNT)")
+        } in ${this.getDeclaredName(entity.parentAE)}`
+    } else if (entity.type === M2M_Type.ContentInstance) {
+      return `The value of ${this.getDeclaredName(entity.container)}`
+    } else {
+      return `unknown`
+    }
+  }
+
+  protected ensureSubscribeAE(aename:string) {
+    if (this.subAEList.indexOf(aename) < 0) {
+      this.subAEList.push(aename)
+      this.mqttClient?.subscribe(`/oneM2M/req/+/S${aename}/#`)
+      this.mqttClient?.subscribe(`/oneM2M/resp/S${aename}/+`)
+    }
+  }
+  protected ensureUnsubscribeAE(aename:string) {
+    const index = this.subAEList.indexOf(aename)
+    if (index >= 0) {
+      this.subAEList.splice(index, 1)
+      this.mqttClient?.unsubscribe(`/oneM2M/req/+/S${aename}/#`)
+      this.mqttClient?.unsubscribe(`/oneM2M/resp/S${aename}/+`)
+    }
+  }
+}
+
+export class ThymeAE implements ApplicationEntity {
+  public readonly type:M2M_Type.ApplicationEntity = M2M_Type.ApplicationEntity
+  public readonly aei:string
+  public readonly resourceName:string
+  public readonly resourceId:string
+  public constructor(thyme:Thyme, ae:ApplicationEntity) {
+    this.aei = ae.aei
+    this.resourceName = ae.resourceName;
+    this.resourceId = ae.resourceId;
+  }
 }
 
 function genContentType(type:M2M_Type) {
@@ -432,11 +577,27 @@ export interface ContentInstance extends Readonly<Resource> {
   readonly value:string,
 }
 
+export interface SubscribeData extends Readonly<Resource> {
+  readonly type:M2M_Type.Subscribe,
+  readonly container:Container,
+  readonly notiURL:string,
+}
+
 export interface ThymeOption {
   host:string,
-  port:number,
-  protocol?:"http", // @todo support websocket, coap, mqtt
-  secure?:false // @todo secure connection..
+  main:"http", // @todo support mqtt main
+  http:{
+    port:number,
+    secure?:false,
+  },
+  mqtt:{
+    port:number,
+  }
+}
+
+interface ValueCallback {
+  readonly container:Container,
+  callback:(newValue:string) => unknown,
 }
 
 interface ResponsePair<T> {

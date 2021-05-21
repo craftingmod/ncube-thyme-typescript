@@ -3,16 +3,25 @@ import { Thyme } from "./index"
 async function main() {
   const thyme = new Thyme("Mobius", {
     host: "203.253.128.177",
-    port: 7579,
-    protocol: "http",
+    main: "http",
+    http: {
+      port: 7579,
+      secure: false,
+    },
+    mqtt: {
+      port: 1883,
+    }
   });
   await thyme.connect()
   // create Application Entity
-  const myAE = await thyme.ensureApplicationEntity("ncube_ts_sample")
+  const myAE = await thyme.ensureApplicationEntity("ncube_nodejs_sample", true)
   // create Container
-  const light = await thyme.ensureContainer(myAE, "light")
-  await thyme.addContentInstance(light, "126788")
-  console.log(`Sensor: ${(await thyme.queryLastContentInstance(light)).value}`)
+  const led1 = await thyme.ensureContainer(myAE, "led1", true)
+  const led2 = await thyme.ensureContainer(myAE, "led2", true)
+  await thyme.subscribeContainer(led1, "test1sub")
+  await thyme.subscribeContainer(led2, "test2sub")
+  await thyme.addContentInstance(led1, "120")
+  await thyme.addContentInstance(led2, "120")
 }
 
 main()

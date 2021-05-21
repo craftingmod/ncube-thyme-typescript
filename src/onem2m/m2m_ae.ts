@@ -9,8 +9,7 @@ import { DateString, M2M_Type } from "./m2m_type";
 export interface M2M_AE extends M2MBase {
   ty: M2M_Type.ApplicationEntity,
   /**
-   * unknown
-   * @todo fill
+   * Expire Time
    */
   et: DateString,
   /**
