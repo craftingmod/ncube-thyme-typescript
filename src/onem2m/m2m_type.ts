@@ -1,4 +1,8 @@
-export enum M2M_Type {
+/**
+ * HTTP Mapping
+ */
+
+ export enum M2MType {
   /**
    * Application Entity
    */

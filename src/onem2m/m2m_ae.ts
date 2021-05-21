@@ -1,5 +1,5 @@
 import { M2MBase } from "./m2m_base";
-import { DateString, M2M_Type } from "./m2m_type";
+import { DateString, M2MType } from "./m2m_type";
 
 /**
  * oneM2M CSE(Common Service Entity) Base
@@ -7,7 +7,7 @@ import { DateString, M2M_Type } from "./m2m_type";
  * `from`: Response pattern
  */
 export interface M2M_AE extends M2MBase {
-  ty: M2M_Type.ApplicationEntity,
+  ty: M2MType.ApplicationEntity,
   /**
    * Expire Time
    */

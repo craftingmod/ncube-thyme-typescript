@@ -1,6 +1,9 @@
 # ncube-thyme-typescript
 
-nCube Thyme for Typescript
+### nCube Thyme for Typescript
+
+Pseudo [oneM2M](https://www.onem2m.org/) implementation focused on
+[Mobius IoT platform](https://github.com/IoTKETI/Mobius)
 
 ## Install
 
@@ -10,39 +13,50 @@ $ npm i -S ncube-thyme-typescript
 
 ## Usage
 
-###### Connect
-
 ```typescript
-import { Thyme } from 'ncube-thyme-typescript';
+import { Thyme } from "ncube-thyme-typescript"
 
-const thyme = new Thyme('Mobius', {
-  host: 'localhost',
-  port: 7579,
-  protocol: 'http',
-});
-
-await thyme.connect(); // in async function
+// create thyme instance
+const thyme = new Thyme({
+  main: {
+    // restful protocol
+    type: ThymeProtocol.HTTP, // http
+    host: "203.253.128.161", // KETI test server
+    port: 7579,
+  },
+  sub: {
+    // subscribe protocol
+    type: ThymeProtocol.MQTT, // mqtt
+    port: 1883,
+  },
+})
+async function printSensor() {
+  // connect
+  await thyme.connect()
+  // Get Common Service Entity Base (Mobius platform)
+  const mobius = await thyme.getCSEBase("Mobius")
+  // Create Application Entity if not exist, Get Application Entity if exist
+  const sampleAE = await mobius.ensureApplicationEntity(
+    "ncube_nodejs_sample",
+    false
+  )
+  // Create sensor value container (We will use light with 1024 byte space)
+  const led = await sampleAE.ensureContainer("light", 1024, false)
+  // Add value which we want to add :)
+  await led.addContentInstance("100")
+  // Print our last led value which we have been uploaded
+  console.log("Sensor: " + (await led1.queryLastValue()))
+}
+printSensor()
 ```
 
-###### Create Application Entity (Group)
+- Result
 
-```typescript
-const cameraAE = await thyme.ensureApplicationEntity('camera_sample');
 ```
-
-###### Create Container (Sensor)
-
-```typescript
-const people = await thyme.ensureContainer(cameraAE, 'people');
-```
-
-###### Set ContentInstance (Sensor Value)
-
-```typescript
-const count = await thyme.addContentInstance(people, '5300');
-console.log(count.value); // 5300
+Sensor: 100
 ```
 
 ## Original
 
-[nCube-Thyme-Nodejs](https://github.com/IoTKETI/nCube-Thyme-Nodejs) by [IoTKETI](https://github.com/IoTKETI)
+[nCube-Thyme-Nodejs](https://github.com/IoTKETI/nCube-Thyme-Nodejs) by
+[IoTKETI](https://github.com/IoTKETI)

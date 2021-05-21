@@ -1,23 +1,29 @@
 import Chalk from "chalk"
 import Debug from "debug"
-import got, { Response } from "got"
-import mqtt from "mqtt"
 import shortid from "shortid"
 
-import { M2M_AERes } from "./onem2m/m2m_ae"
-import { M2MError } from "./onem2m/m2m_base"
-import { M2M_CBRes } from "./onem2m/m2m_cb"
-import { M2M_CINRes } from "./onem2m/m2m_cin"
-import { M2M_CNTRes } from "./onem2m/m2m_cnt"
+import { M2M_AE, M2M_AERes } from "./onem2m/m2m_ae"
+import { convertM2MTimestamp, M2MBase, M2MError } from "./onem2m/m2m_base"
+import { M2M_CB, M2M_CBRes } from "./onem2m/m2m_cb"
+import { M2M_CIN, M2M_CINRes } from "./onem2m/m2m_cin"
+import { M2M_CNT, M2M_CNTRes } from "./onem2m/m2m_cnt"
 import { resNotExists } from "./onem2m/m2m_debug"
-import { M2M_Header } from "./onem2m/m2m_header"
-import { M2M_Keys } from "./onem2m/m2m_key"
+import {
+  HTTPTransport,
+  M2MHeader,
+  M2MKeys,
+  M2MOperation,
+  M2MSubTransport,
+  M2MTransport,
+  MQTTTransport,
+} from "./onem2m/m2m_protocol"
 import { M2M_SUB, M2M_SUBRes } from "./onem2m/m2m_sub"
-import { M2M_Type } from "./onem2m/m2m_type"
+import { M2MType } from "./onem2m/m2m_type"
 
-const debugMain = Debug("Thyme:main")
-const debugSub = Debug("Thyme:sub")
-const maxBufferSize = 16384
+const debugMain = Debug("Thyme_main:main")
+const debugSub = Debug("Thyme_main:sub")
+
+const defaultMaxBufferSize = 20480
 const APIVER = "0.2.481.2.0001.001.000111"
 
 const m2m_ae_basebody = {
@@ -26,124 +32,178 @@ const m2m_ae_basebody = {
   rr: true,
 }
 
-export class Thyme {
-  private pointOfAccess:string[]
-  private options:ThymeOption
-  private cseBase:string
-  private m2mBaseHeader:M2M_Header
-  private mqttClient:mqtt.Client
-  private subAEList:string[]
-  public constructor(base:string, options:ThymeOption) {
-    this.options = options
-    this.cseBase = base
-    this.subAEList = []
-    this.m2mBaseHeader = {
-      "Accept": "application/json",
+export class Thyme<M extends ThymeProtocol, S extends SubscribeProtos>
+  implements ThymeBase
+{
+  protected mainProtoName: ThymeProtocol
+  protected subProtoName: ThymeProtocol
+  public mainProtocol: M2MTransport
+  public subProtocol: M2MSubTransport
+  public baseM2MHeader: M2MHeader
+  public constructor(options: Thyme2Option<M, S>) {
+    this.mainProtoName = options.main.type
+    this.subProtoName = options.sub?.type ?? this.mainProtoName
+    this.baseM2MHeader = {
       "X-M2M-RI": `thyme/${shortid()}`,
     }
-    if (this.options.host.endsWith("/")) {
-      this.options.host = this.options.host.substring(0, this.options.host.length - 1)
+    const getProto = (name: "main" | "sub") => {
+      const opt = options[name]
+      switch (opt.type) {
+        case ThymeProtocol.HTTP:
+          return new HTTPTransport(
+            opt.host ?? options.main.host,
+            opt.port,
+            opt.secure ?? false
+          )
+          break
+        case ThymeProtocol.MQTT:
+          return new MQTTTransport(
+            opt.host ?? options.main.host,
+            opt.port,
+            opt.secure ?? false
+          )
+          break
+      }
+      throw new Error("Not implemented")
+    }
+    this.mainProtocol = getProto("main")
+    if (options.sub == null) {
+      this.subProtocol = this.mainProtocol
+    } else {
+      this.subProtocol = getProto("sub")
     }
   }
   public async connect() {
-    // check CSEBase Match
-    const cseBaseRes = await this.request<M2M_CBRes>(
-      PostType.GET,
-      [this.cseBase],
-      {
-        ...this.m2mBaseHeader,
+    if (this.mainProtoName === (this.subProtoName as ThymeProtocol)) {
+      const connected = await this.mainProtocol.connect()
+      if (!connected) {
+        throw new Error("Socket isn't connected.")
+      }
+    } else {
+      const connected =
+        (await this.mainProtocol.connect()) &&
+        (await this.subProtocol.connect())
+      if (!connected) {
+        throw new Error("Socket isn't connected.")
+      }
+    }
+  }
+  public async getCSEBase(cseName: string) {
+    const cseBaseRes = await this.mainProtocol.request<M2M_CBRes>({
+      opcode: M2MOperation.RETRIEVE,
+      params: [cseName],
+      header: {
+        ...this.baseM2MHeader,
         "X-M2M-Origin": `S`,
       },
-    )
-    const cseBase = cseBaseRes.response[M2M_Keys.cseBase]
-    if (cseBase.rn != this.cseBase) {
-      throw new Error(`CSEBase does not match to ${this.cseBase}!`)
+    })
+    const cseBase = cseBaseRes.response[M2MKeys.cseBase]
+    if (cseBase.rn != cseName) {
+      throw new Error(`CSEBase does not match to ${cseName}!`)
     }
-    debugMain(`${Chalk.gray("[HTTP]")} ${Chalk.green(this.options.host)} is connected with ${Chalk.gray("CSEBase")} ${Chalk.redBright(cseBase.rn)}`)
-    this.pointOfAccess = cseBase.poa
-    // check mqtt
-    this.mqttClient = mqtt.connect(`mqtt://${this.options.host}:${this.options.mqtt.port}`)
-    try {
-      await new Promise<void>((res, rej) => {
-        const cancel = setTimeout(() => rej("Timeout"), 2000)
-        this.mqttClient.on("connect", () => {
-          clearTimeout(cancel)
-          res()
-        })
-      })
-      debugSub(`${Chalk.gray("[MQTT]")} ${Chalk.green(this.options.host)} is connected.`)
-      // add content
-      this.mqttClient.on("message", this.mqttCallback)
-    } catch (err) {
-      console.log(`${Chalk.gray("[MQTT]")} ${Chalk.red(this.options.host)} failed to connect mqtt. Sub won't work.`)
-      this.mqttClient = null
-    }
+    debugMain(`${Chalk.gray("CSEBase")} ${Chalk.redBright(cseBase.rn)} found.`)
+    return new ThymeCSE(this, cseBase)
+  }
+}
+
+/**
+ * Thyme CSE(Common Service Entry)
+ */
+export class ThymeCSE implements CSEBase, ThymeBase {
+  public readonly type = M2MType.CSEBase
+  public readonly createdTime: Date
+  public readonly modifiedTime: Date
+  public readonly resourceName: string
+  public readonly resourceId: string
+  public readonly cseName: string
+  public readonly raw: M2M_CB
+
+  protected pointOfAccess: string[] = []
+
+  public readonly mainProtocol: M2MTransport
+  public readonly subProtocol: M2MSubTransport
+  public readonly baseM2MHeader: M2MHeader
+  public constructor(thymeBase: ThymeBase, resp: M2M_CB) {
+    this.mainProtocol = thymeBase.mainProtocol
+    this.subProtocol = thymeBase.subProtocol
+    this.baseM2MHeader = thymeBase.baseM2MHeader
+    this.raw = resp
+
+    this.createdTime = convertM2MTimestamp(resp.ct)
+    this.modifiedTime = convertM2MTimestamp(resp.lt)
+    this.resourceName = resp.rn
+    this.resourceId = resp.ri
+    this.cseName = this.resourceName
+    this.pointOfAccess.push(...resp.poa)
+  }
+  public async connect() {
+    // nothing
+    return true
   }
   /**
    * Create AE(Application Entity).
-   * 
+   *
    * If `ae` is exists, it will throw error.
-   * 
+   *
    * @param resourceName AE name
    * @returns Created ApplicationEntity object
    * @throws `Error` if `ae` is exist
    */
-  public async createApplicationEntity(resourceName:string):Promise<ApplicationEntity> {
-    const createAERes = await this.request<M2M_AERes>(
-      PostType.POST,
-      [this.cseBase],
-      {
-        ...this.m2mBaseHeader,
-        "X-M2M-Origin": "S",
-        "Content-Type": genContentType(M2M_Type.ApplicationEntity),
+  public async createApplicationEntity(resourceName: string) {
+    const createAERes = await this.mainProtocol.request<M2M_AERes>({
+      opcode: M2MOperation.CREATE,
+      params: [this.cseName],
+      header: {
+        ...this.baseM2MHeader,
+        "X-M2M-Origin": `S`,
+        "Content-Type": genContentType(M2MType.ApplicationEntity),
       },
-      {
+      body: {
         "m2m:ae": {
           ...m2m_ae_basebody,
           poa: this.pointOfAccess,
           rn: resourceName,
-        }
-      }
+        },
+      },
+    })
+    const response = createAERes.response[M2MKeys.applicationEntity]
+    const out: ApplicationEntity = this.respToSerial(response)
+    debugMain(
+      `${getDeclaredName(out)} with id ${Chalk.yellow(
+        response.aei
+      )} has been ${Chalk.greenBright("created")}.`
     )
-    const response = createAERes.response[M2M_Keys.applicationEntity]
-    const out:ApplicationEntity = {
-      type: M2M_Type.ApplicationEntity,
-      resourceName: response.rn,
-      resourceId: response.ri,
-      aei: response.aei,
-    }
-    this.ensureSubscribeAE(out.resourceName)
-    debugMain(`${this.getDeclaredName(out)} with id ${Chalk.yellow(response.aei)
-      } has been ${Chalk.greenBright("created")}.`)
     return out
   }
   /**
    * Delete `AE`(Application Entity).
-   * 
+   *
    * If `ae` is not exists, it will throw error.
-   * 
+   *
    * @param resource `AE` name or `AE` object
    * @returns Deleted `AE` object. (Do not use it)
    * @throws `Error` if `ae` isn't exist
    */
-  public async deleteApplicationEntity(resource:string | ApplicationEntity):Promise<ApplicationEntity> {
-    const resName = typeof resource === "string" ? resource : resource.resourceName
-    const deleteAERes = await this.request<M2M_AERes>(
-      PostType.DELETE,
-      [this.cseBase, resName],
-      {
-        ...this.m2mBaseHeader,
-        "X-M2M-Origin": "Superman", // Permission?
-      }
+  public async deleteApplicationEntity(
+    resource: string | ApplicationEntity
+  ): Promise<ApplicationEntity> {
+    const resName =
+      typeof resource === "string" ? resource : resource.resourceName
+    const deleteAERes = await this.mainProtocol.request<M2M_AERes>({
+      opcode: M2MOperation.DELETE,
+      params: [this.cseName, resName],
+      header: {
+        ...this.baseM2MHeader,
+        "X-M2M-Origin": `Superman`,
+      },
+    })
+    const response = deleteAERes.response[M2MKeys.applicationEntity]
+    const out: ApplicationEntity = this.respToSerial(response)
+    debugMain(
+      `${getDeclaredName(out)} with id ${Chalk.yellow(
+        response.aei
+      )} has been ${Chalk.redBright("removed")}.`
     )
-    const response = deleteAERes.response[M2M_Keys.applicationEntity]
-    const out:ApplicationEntity = {
-      type: M2M_Type.ApplicationEntity,
-      resourceName: response.rn,
-      resourceId: response.ri,
-      aei: response.aei,
-    }
-    debugMain(`${this.getDeclaredName(out)} with id ${Chalk.blue(response.aei)} has been ${Chalk.redBright("removed")}.`)
     return out
   }
   /**
@@ -152,36 +212,36 @@ export class Thyme {
    * @returns Queried `AE` object
    * @throws `Error` if `AE` isn't exist
    */
-  public async queryApplicationEntity(resourceName:string):Promise<ApplicationEntity> {
-    const queryAERes = await this.request<M2M_AERes>(
-      PostType.GET,
-      [this.cseBase, resourceName],
-      {
-        ...this.m2mBaseHeader,
-        "X-M2M-Origin": `S${resourceName}`, // Permission again?
-      }
-    )
-    const response = queryAERes.response[M2M_Keys.applicationEntity]
-    return {
-      type: M2M_Type.ApplicationEntity,
-      resourceName: response.rn,
-      resourceId: response.ri,
-      aei: response.aei,
-    }
+  public async queryApplicationEntity(
+    resourceName: string
+  ): Promise<ApplicationEntity> {
+    const queryAERes = await this.mainProtocol.request<M2M_AERes>({
+      opcode: M2MOperation.RETRIEVE,
+      params: [this.cseName, resourceName],
+      header: {
+        ...this.baseM2MHeader,
+        "X-M2M-Origin": `S${resourceName}`,
+      },
+    })
+    const response = queryAERes.response[M2MKeys.applicationEntity]
+    return this.respToSerial(response)
   }
   /**
    * Ensure given `AE`(Application Entity) is exist without error.
    * @param resourceName `AE` name
    * @param cleanup if enabled, `AE` is cleaned up if exists.
-   * @returns Created or queried `AE`
+   * @returns Created or queried `AE` with active state
    */
-  public async ensureApplicationEntity(resourceName:string, cleanup?:boolean):Promise<ApplicationEntity> {
-    let ae:ApplicationEntity = null
+  public async ensureApplicationEntity(
+    resourceName: string,
+    cleanup?: boolean
+  ): Promise<ThymeAE> {
+    let ae: ApplicationEntity = null
     try {
       ae = await this.queryApplicationEntity(resourceName)
-    } catch (err:unknown) {
+    } catch (err: unknown) {
       if (err instanceof M2MError) {
-        if (err.debugLog == resNotExists) {
+        if (err.responseCode === 404) {
           // pass
         } else {
           throw err
@@ -194,113 +254,169 @@ export class Thyme {
       if (cleanup != null && cleanup) {
         await this.deleteApplicationEntity(ae)
       } else {
-        this.ensureSubscribeAE(ae.resourceName)
-        return ae
+        return this.connectAE(ae)
       }
     }
     // create
-    return this.createApplicationEntity(resourceName)
+    return this.connectAE(await this.createApplicationEntity(resourceName))
+  }
+
+  /**
+   * Activate ApplicationEntity with subscribe & command
+   * @param ae ApplicationEntity object
+   * @returns ThymeAE
+   */
+  public async connectAE(ae: ApplicationEntity) {
+    const out = new ThymeAE(this, ae)
+    await out.connect()
+    return out
+  }
+  /**
+   * Response to serialized object
+   * @param resp Response
+   * @returns Serialized Object
+   */
+  protected respToSerial(resp: M2M_AE): ApplicationEntity {
+    return {
+      type: M2MType.ApplicationEntity,
+      ...serialGeneral(resp),
+      parentCSE: this,
+      aei: resp.aei,
+      raw: resp,
+    }
+  }
+}
+
+/**
+ * Thyme AE(Application Entity)
+ */
+export class ThymeAE implements ApplicationEntity, ThymeBase {
+  /* predefine */
+  public readonly type: M2MType.ApplicationEntity = M2MType.ApplicationEntity
+  public readonly resourceName: string
+  public readonly resourceId: string
+  public readonly createdTime: Date
+  public readonly modifiedTime: Date
+
+  public readonly parentCSE: ThymeCSE
+  public readonly raw: M2M_AE
+  public readonly mainProtocol: M2MTransport
+  public readonly subProtocol: M2MSubTransport
+  public readonly baseM2MHeader: M2MHeader
+
+  public readonly aei: string
+
+  public constructor(parentCSE: ThymeCSE, ae: ApplicationEntity) {
+    this.aei = ae.aei
+    this.resourceName = ae.resourceName
+    this.resourceId = ae.resourceId
+    this.createdTime = ae.createdTime
+    this.modifiedTime = ae.modifiedTime
+    this.parentCSE = parentCSE
+    this.raw = ae.raw
+
+    // CSE
+    this.mainProtocol = parentCSE.mainProtocol
+    this.subProtocol = parentCSE.subProtocol
+    this.baseM2MHeader = parentCSE.baseM2MHeader
+  }
+  public async connect() {
+    // @todo mqtt watch
   }
   /**
    * Create Container in `ae`
-   * @param ae Application Entity
    * @param containerName Container Name
+   * @param maxBufferSize **the max size of state. (in bytes)**
    * @returns Created Container
    * @throws If given name container is exist.
    */
-  public async createContainer(ae:ApplicationEntity, containerName:string):Promise<Container> {
-    const createCntRes = await this.request<M2M_CNTRes>(
-      PostType.POST,
-      [this.cseBase, ae.resourceName],
-      {
-        ...this.m2mBaseHeader,
-        "X-M2M-Origin": ae.aei,
-        "Content-Type": genContentType(M2M_Type.Container),
+  public async createContainer(
+    containerName: string,
+    maxBufferSize?: number
+  ): Promise<Container> {
+    const createCntRes = await this.mainProtocol.request<M2M_CNTRes>({
+      opcode: M2MOperation.CREATE,
+      params: [this.parentCSE.cseName, this.resourceName],
+      header: {
+        ...this.baseM2MHeader,
+        "X-M2M-Origin": this.aei,
+        "Content-Type": genContentType(M2MType.Container),
       },
-      {
+      body: {
         "m2m:cnt": {
           rn: containerName,
           lbl: [containerName],
-          mbs: maxBufferSize, // maxBufferSize
-        }
-      }
+          mbs: maxBufferSize ?? defaultMaxBufferSize, // maxBufferSize
+        },
+      },
+    })
+    const response = createCntRes.response[M2MKeys.container]
+    const out: Container = this.respToSerial(response)
+    debugMain(
+      `${getDeclaredName(out)} has been ${Chalk.greenBright("created")}.`
     )
-    const response = createCntRes.response[M2M_Keys.container]
-    const out:Container = {
-      type: M2M_Type.Container,
-      resourceName: response.rn,
-      resourceId: response.ri,
-      parentAE: ae, // immutable
-    }
-    debugMain(`${this.getDeclaredName(out)} has been ${Chalk.greenBright("created")}.`)
     return out
   }
   /**
    * Delete Container in `ae` or just container
-   * @param aeOrContainer AE or Container
-   * @param container Container name if AE is present
-   * @returns Deleted `AE` object. (Do not use it)
-   * @throws If given `Container` or `AE` isn't exist
+   * @param container Container name or Container
+   * @returns Deleted `Container` object. (Do not use it)
+   * @throws If given `Container` isn't exist
    */
-  public async deleteContainer(aeOrContainer:ApplicationEntity | Container, container?:string):Promise<Container> {
-    const ae = aeOrContainer.type === M2M_Type.Container ? aeOrContainer.parentAE : aeOrContainer
-    const conName = aeOrContainer.type === M2M_Type.Container ? aeOrContainer.resourceName : container
-    const deleteCntRes = await this.request<M2M_CNTRes>(
-      PostType.DELETE,
-      [this.cseBase, ae.resourceName, conName],
-      {
-        ...this.m2mBaseHeader,
-        "X-M2M-Origin": ae.aei,
-      }
-    )
-    const response = deleteCntRes.response[M2M_Keys.container]
-    const out:Container = {
-      type: M2M_Type.Container,
-      resourceName: response.rn,
-      resourceId: response.ri,
-      parentAE: ae, // immutable
-    }
-    debugMain(`${this.getDeclaredName(out)} has been ${Chalk.redBright("removed")}.`)
+  public async deleteContainer(
+    container: Container | string
+  ): Promise<Container> {
+    const conName =
+      typeof container === "string" ? container : container.resourceName
+    const deleteCntRes = await this.mainProtocol.request<M2M_CNTRes>({
+      opcode: M2MOperation.DELETE,
+      params: [this.parentCSE.cseName, this.resourceName, conName],
+      header: {
+        ...this.baseM2MHeader,
+        "X-M2M-Origin": this.aei,
+      },
+    })
+    const response = deleteCntRes.response[M2MKeys.container]
+    const out: Container = this.respToSerial(response)
+    debugMain(`${getDeclaredName(out)} has been ${Chalk.redBright("removed")}.`)
     return out
   }
   /**
    * Query `CNT`(Container) and return Container info.
-   * @param ae Application Entity
    * @param containerName Container Name
    * @returns Queried Container object
    * @throws `Error` if `AE` or Container isn't exist
    */
-  public async queryContainer(ae:ApplicationEntity, containerName:string):Promise<Container> {
-    const queryCntRes = await this.request<M2M_CNTRes>(
-      PostType.GET,
-      [this.cseBase, ae.resourceName, containerName],
-      {
-        ...this.m2mBaseHeader,
-        "X-M2M-Origin": `S${ae.resourceName}`,
-      }
-    )
-    const response = queryCntRes.response[M2M_Keys.container]
-    return {
-      type: M2M_Type.Container,
-      resourceName: response.rn,
-      resourceId: response.ri,
-      parentAE: ae, // immutable
-    }
+  public async queryContainer(containerName: string): Promise<Container> {
+    const queryCntRes = await this.mainProtocol.request<M2M_AERes>({
+      opcode: M2MOperation.RETRIEVE,
+      params: [this.parentCSE.cseName, this.resourceName, containerName],
+      header: {
+        ...this.baseM2MHeader,
+        "X-M2M-Origin": `S${this.resourceName}`,
+      },
+    })
+    const response = queryCntRes.response[M2MKeys.container]
+    return this.respToSerial(response)
   }
   /**
    * Ensure given container is exist
-   * @param ae Application Entity
    * @param containerName Container Name to query
+   * @param maxBufferSize max Buffer size of value
    * @param cleanup the bool of Clear container
    * @returns Container of `containerName`
    */
-  public async ensureContainer(ae:ApplicationEntity, containerName:string, cleanup?:boolean):Promise<Container> {
-    let container:Container = null
+  public async ensureContainer(
+    containerName: string,
+    maxBufferSize: number,
+    cleanup?: boolean
+  ) {
+    let container: Container = null
     try {
-      container = await this.queryContainer(ae, containerName)
-    } catch (err:unknown) {
+      container = await this.queryContainer(containerName)
+    } catch (err: unknown) {
       if (err instanceof M2MError) {
-        if (err.debugLog == resNotExists) {
+        if (err.responseCode === 404) {
           // pass
         } else {
           throw err
@@ -313,300 +429,406 @@ export class Thyme {
       if (cleanup != null && cleanup) {
         await this.deleteContainer(container)
       } else {
-        return container
+        const cont = new ThymeContainer(this, container)
+        await cont.connect()
+        return cont
       }
     }
     // create
-    return this.createContainer(ae, containerName)
+    const cont = new ThymeContainer(
+      this,
+      await this.createContainer(containerName, maxBufferSize)
+    )
+    await cont.connect()
+    return cont
+  }
+
+  protected respToSerial(resp: M2M_CNT): Container {
+    return {
+      type: M2MType.Container,
+      ...serialGeneral(resp),
+      parentAE: this, // immutable..?
+      maxBufferSize: resp.mbs,
+      raw: resp,
+    }
+  }
+}
+
+/**
+ * Container
+ *
+ * or sensor value store?
+ */
+export class ThymeContainer implements Container, ThymeBase {
+  /* predefine */
+  public readonly type = M2MType.Container
+  public readonly resourceName: string
+  public readonly resourceId: string
+  public readonly createdTime: Date
+  public readonly modifiedTime: Date
+
+  public readonly raw: M2M_CNT
+  public readonly parentAE: ThymeAE
+  public readonly mainProtocol: M2MTransport
+  public readonly subProtocol: M2MSubTransport
+  public readonly baseM2MHeader: M2MHeader
+
+  public readonly maxBufferSize: number
+
+  public constructor(parentAE: ThymeAE, container: Container) {
+    this.resourceName = container.resourceName
+    this.resourceId = container.resourceId
+    this.createdTime = container.createdTime
+    this.modifiedTime = container.modifiedTime
+    this.parentAE = parentAE
+    this.raw = container.raw
+
+    // CSE
+    this.mainProtocol = parentAE.mainProtocol
+    this.subProtocol = parentAE.subProtocol
+    this.baseM2MHeader = parentAE.baseM2MHeader
+
+    // Value
+    this.maxBufferSize = container.maxBufferSize
+  }
+  public async connect() {
+    return true
   }
   /**
    * Add ContentInstance value to Container
-   * @param container Container
+   *
+   * aka. Put sensor value
    * @param value Value (string)
    * @returns ContentInstance
    */
-  public async addContentInstance(container:Container, value:string):Promise<ContentInstance> {
-    const ae = container.parentAE
-    const createCinRes = await this.request<M2M_CINRes>(
-      PostType.POST,
-      [this.cseBase, ae.resourceName, container.resourceName],
-      {
-        ...this.m2mBaseHeader,
+  public async addContentInstance(value: string): Promise<ContentInstance> {
+    const ae = this.parentAE
+    const createCinRes = await this.mainProtocol.request<M2M_CINRes>({
+      opcode: M2MOperation.CREATE,
+      params: [ae.parentCSE.cseName, ae.resourceName, this.resourceName],
+      header: {
+        ...this.baseM2MHeader,
         "X-M2M-Origin": ae.aei,
-        "Content-Type": genContentType(M2M_Type.ContentInstance),
+        "Content-Type": genContentType(M2MType.ContentInstance),
       },
-      {
+      body: {
         "m2m:cin": {
-          "con": value
-        }
-      }
+          con: value,
+        },
+      },
+    })
+    const response = createCinRes.response[M2MKeys.contentInstance]
+    const out: ContentInstance = this.respToSerial(response)
+    debugMain(
+      `${getDeclaredName(out)} has been updated to ${Chalk.cyanBright(
+        response.con
+      )}.`
     )
-    const response = createCinRes.response[M2M_Keys.contentInstance]
-    const out:ContentInstance = {
-      type: M2M_Type.ContentInstance,
-      resourceName: response.rn,
-      resourceId: response.ri,
-      value: response.con,
-      container,
-    }
-    debugMain(`${this.getDeclaredName(out)} has been updated to ${Chalk.cyanBright(response.con)}.`)
     return out
   }
   /**
-   * Query last ContentInstance value
-   * @param container Container
+   * Get latest value of data
+   *
+   * If data isn't presented, It will return `""`
+   * @returns string value(sensor data)
+   */
+  public async queryLastValue() {
+    try {
+      const data = await this.queryContentInstance({ latest: 1 })
+      return data[0].value
+    } catch (err: unknown) {
+      if (err instanceof M2MError) {
+        if (err.responseCode === 404) {
+          // pass
+        } else {
+          throw err
+        }
+      } else {
+        throw err
+      }
+    }
+    return ""
+  }
+  /**
+   * Query ContentInstance
+   *
+   * Uses filter
+   * @param filter Filter (before, after, latest cound)
    * @returns last `value` (string)
    * @throws There isn't any ContentInstance value
    */
-  public async queryLastContentInstance(container:Container):Promise<ContentInstance> {
-    const ae = container.parentAE
-    const queryCinRes = await this.request<M2M_CINRes>(
-      PostType.GET,
-      [this.cseBase, ae.resourceName, container.resourceName, "latest"],
-      {
-        ...this.m2mBaseHeader,
+  public async queryContentInstance(filter: {
+    before?: Date
+    after?: Date
+    latest: number
+  }): Promise<ContentInstance[]> {
+    const ae = this.parentAE
+    const queryCinRes = await this.mainProtocol.request<{
+      "m2m:rsp": { "m2m:cin": M2M_CIN[] }
+    }>({
+      opcode: M2MOperation.RETRIEVE,
+      params: [ae.parentCSE.cseName, ae.resourceName, this.resourceName],
+      header: {
+        ...this.baseM2MHeader,
         "X-M2M-Origin": `S${ae.resourceName}`,
-      }
+      },
+      urlOptions: {
+        ty: M2MType.ContentInstance, // resource type
+        rcn: M2MType.ContentInstance, // response "content type"
+        fu: 2, // API version? unknown
+        crb: convertM2MTimestamp(filter.before) ?? undefined,
+        cra: convertM2MTimestamp(filter.after) ?? undefined,
+        la: filter.latest,
+      },
+    })
+    const response = queryCinRes.response["m2m:rsp"]["m2m:cin"]
+    const out: ContentInstance[] = response.map((v) => this.respToSerial(v))
+    debugMain(
+      `${getDeclaredName(out[0])} is ${out
+        .map((v) => Chalk.blueBright(v.value))
+        .join("|")}.`
     )
-    const response = queryCinRes.response[M2M_Keys.contentInstance]
-    const out:ContentInstance = {
-      type: M2M_Type.ContentInstance,
-      resourceName: response.rn,
-      resourceId: response.ri,
-      value: response.con,
-      container,
-    }
-    debugMain(`${this.getDeclaredName(out)} is ${Chalk.cyanBright(response.con)}.`)
     return out
   }
+
   /**
    * Subscribe container.
    * @param container Container
    * @param subscribeName subscribe name
    * @returns subscribe data?
    */
-  public async subscribeContainer(container:Container, subscribeName:string):Promise<SubscribeData> {
-    const ae = container.parentAE
-    let response:M2M_SUB
+  public async subscribe(subscribeName: string): Promise<SubscribeData> {
+    const ae = this.parentAE
+    let response: M2M_SUB
     try {
-      const subExistRes = await this.request<M2M_SUBRes>(
-        PostType.GET,
-        [this.cseBase, ae.resourceName, container.resourceName, subscribeName],
-        {
-          ...this.m2mBaseHeader,
+      const subExistRes = await this.mainProtocol.request<M2M_SUBRes>({
+        opcode: M2MOperation.RETRIEVE,
+        params: [
+          ae.parentCSE.cseName,
+          ae.resourceName,
+          this.resourceName,
+          subscribeName,
+        ],
+        header: {
+          ...this.baseM2MHeader,
           "X-M2M-Origin": `S${ae.resourceName}`,
-        }
-      )
-      response = subExistRes.response[M2M_Keys.subscribe]
+        },
+      })
+      response = subExistRes.response[M2MKeys.subscribe]
     } catch (err) {
-      if (err instanceof M2MError && err.debugLog == resNotExists) {
-        const createSubRes = await this.request<M2M_SUBRes>(
-          PostType.POST,
-          [this.cseBase, ae.resourceName, container.resourceName],
-          {
-            ...this.m2mBaseHeader,
+      if (err instanceof M2MError && err.debugLog === resNotExists) {
+        const createSubRes = await this.mainProtocol.request<M2M_SUBRes>({
+          opcode: M2MOperation.CREATE,
+          params: [ae.parentCSE.cseName, ae.resourceName, this.resourceName],
+          header: {
+            ...this.baseM2MHeader,
             "X-M2M-Origin": `S${ae.resourceName}`,
-            "Content-Type": genContentType(M2M_Type.Subscribe),
+            "Content-Type": genContentType(M2MType.Subscribe),
           },
-          {
+          body: {
             "m2m:sub": {
               rn: subscribeName,
               enc: {
-                net: [1,2,3,4]
+                net: [1, 2, 3, 4],
               },
               nu: [
-                `mqtt://${this.options.host}:${this.options.mqtt.port}/S${ae.resourceName}?ct=json`
+                `${this.subProtocol.getBaseURL()}/S${ae.resourceName}?ct=json`,
               ],
               exc: 10,
-            }
-          }
-        )
-        response = createSubRes.response[M2M_Keys.subscribe]
+            },
+          },
+        })
+        response = createSubRes.response[M2MKeys.subscribe]
       } else {
         throw err
       }
     }
     // code
-    debugSub(`${this.getDeclaredName(container)} is ${Chalk.greenBright("subscribed")}.`)
+    debugSub(`${getDeclaredName(this)} is ${Chalk.greenBright("subscribed")}.`)
     return {
-      type: M2M_Type.Subscribe,
-      resourceName: response.rn,
-      resourceId: response.ri,
-      container,
+      type: M2MType.Subscribe,
+      ...serialGeneral(response),
+      raw: response,
+      container: this,
       notiURL: response.nu[0],
     }
   }
 
-  public async unsubscribeContainer(container:Container, subscribeName:string):Promise<SubscribeData> {
-    const ae = container.parentAE
-    const deleteCntRes = await this.request<M2M_SUBRes>(
-      PostType.DELETE,
-      [this.cseBase, ae.resourceName, container.resourceName, subscribeName],
-      {
-        ...this.m2mBaseHeader,
+  public async unsubscribeContainer(
+    container: Container,
+    subscribeName: string
+  ): Promise<SubscribeData> {
+    const ae = this.parentAE
+    const deleteCntRes = await this.mainProtocol.request<M2M_SUBRes>({
+      opcode: M2MOperation.DELETE,
+      params: [
+        ae.parentCSE.cseName,
+        ae.resourceName,
+        this.resourceName,
+        subscribeName,
+      ],
+      header: {
+        ...this.baseM2MHeader,
         "X-M2M-Origin": `S${ae.resourceName}`,
-      }
+      },
+    })
+    const response = deleteCntRes.response[M2MKeys.subscribe]
+    debugSub(
+      `${getDeclaredName(container)} is ${Chalk.redBright("unsubscribed")}.`
     )
-    const response = deleteCntRes.response[M2M_Keys.subscribe]
-    debugSub(`${this.getDeclaredName(container)} is ${Chalk.redBright("unsubscribed")}.`)
     return {
-      type: M2M_Type.Subscribe,
-      resourceName: response.rn,
-      resourceId: response.ri,
+      type: M2MType.Subscribe,
+      ...serialGeneral(response),
+      raw: response,
       container,
       notiURL: response.nu[0],
     }
   }
-  
-  /**
-   * Raw request to Mobius server and receive them.
-   * @param type HTTP Type (@todo support other protocol)
-   * @param suburls The array of url which will be postfix (ex: `mobius`/`mynewapp`/`led`)
-   * @param header M2M Header + Custom header to send
-   * @param body The JSON body which will send
-   * @returns Response with type `T`
-   */
-  public async request<T>(type:PostType, suburls:string[], header:M2M_Header | Record<string, unknown>, body?:Record<string, unknown>):Promise<ResponsePair<T>> {
-    if (this.options.main == "http") {
-      const url = `${/*this.options.http.secure === true ? "https" : */"http"}://${this.options.host}:${this.options.http.port}/${suburls.join("/")}`
-      let response:Response<unknown>
-      if (type == PostType.GET) {
-        response = await got.get(url, {
-          responseType: "json",
-          throwHttpErrors: false,
-          headers: header as any,
-        })
-      } else if (type == PostType.POST) {
-        response = await got.post(url, {
-          responseType: "json",
-          throwHttpErrors: false,
-          headers: header as any,
-          json: body ?? {},
-        })
-      } else if (type == PostType.DELETE) {
-        response = await got.delete(url, {
-          responseType: "json",
-          throwHttpErrors: false,
-          headers: header as any,
-        })
-      }
-      const resBody = response.body as Record<string, unknown>
-      const errorMsg = resBody[M2M_Keys.debug] as string | null
-      if (errorMsg != null) {
-        throw new M2MError(errorMsg)
-      }
-      return {
-        statusCode: response.statusCode,
-        response: resBody as T
-      }
-    } else {
-      // @todo implement websocket, mqtt
-      throw new Error("Not implemented yet.")
-    }
-  }
 
-  protected async mqttCallback(topic:string, message:Buffer) {
-    const json = message.toString()
-    debugSub(`${Chalk.yellow(`[${topic}]`)} ${message.toString()}`)
-  }
-  
-  protected getDeclaredName(entity:ApplicationEntity | Container | ContentInstance) {
-    if (entity.type === M2M_Type.ApplicationEntity) {
-      return `${Chalk.blue(entity.resourceName)}${Chalk.gray("(AE)")}`
-    } else if (entity.type === M2M_Type.Container) {
-      return `${Chalk.green(entity.resourceName)}${Chalk.gray("(CNT)")
-        } in ${this.getDeclaredName(entity.parentAE)}`
-    } else if (entity.type === M2M_Type.ContentInstance) {
-      return `The value of ${this.getDeclaredName(entity.container)}`
-    } else {
-      return `unknown`
-    }
-  }
-
-  protected ensureSubscribeAE(aename:string) {
-    if (this.subAEList.indexOf(aename) < 0) {
-      this.subAEList.push(aename)
-      this.mqttClient?.subscribe(`/oneM2M/req/+/S${aename}/#`)
-      this.mqttClient?.subscribe(`/oneM2M/resp/S${aename}/+`)
-    }
-  }
-  protected ensureUnsubscribeAE(aename:string) {
-    const index = this.subAEList.indexOf(aename)
-    if (index >= 0) {
-      this.subAEList.splice(index, 1)
-      this.mqttClient?.unsubscribe(`/oneM2M/req/+/S${aename}/#`)
-      this.mqttClient?.unsubscribe(`/oneM2M/resp/S${aename}/+`)
+  protected respToSerial(resp: M2M_CIN): ContentInstance {
+    return {
+      type: M2MType.ContentInstance,
+      ...serialGeneral(resp),
+      container: this,
+      value: resp.con,
+      raw: resp,
     }
   }
 }
 
-export class ThymeAE implements ApplicationEntity {
-  public readonly type:M2M_Type.ApplicationEntity = M2M_Type.ApplicationEntity
-  public readonly aei:string
-  public readonly resourceName:string
-  public readonly resourceId:string
-  public constructor(thyme:Thyme, ae:ApplicationEntity) {
-    this.aei = ae.aei
-    this.resourceName = ae.resourceName;
-    this.resourceId = ae.resourceId;
-  }
-}
-
-function genContentType(type:M2M_Type) {
+function genContentType(type: M2MType) {
   return `application/vnd.onem2m-res+json;ty=${type}`
 }
 
 interface Resource {
-  readonly type:M2M_Type,
-  readonly resourceName:string,
-  readonly resourceId:string,
+  readonly type: M2MType
+  readonly resourceName: string
+  readonly resourceId: string
+  readonly createdTime: Date
+  readonly modifiedTime: Date
 }
 
+export interface CSEBase extends Readonly<Resource> {
+  readonly type: M2MType.CSEBase
+  readonly raw: M2M_CB
+
+  readonly cseName: string
+}
 export interface ApplicationEntity extends Readonly<Resource> {
-  readonly type:M2M_Type.ApplicationEntity,
-  readonly aei:string,
+  readonly type: M2MType.ApplicationEntity
+  readonly parentCSE: CSEBase
+  readonly raw: M2M_AE
+  /**
+   * Application Entity Id
+   */
+  readonly aei: string
 }
 
 export interface Container extends Readonly<Resource> {
-  readonly type:M2M_Type.Container,
-  readonly parentAE:ApplicationEntity,
+  readonly type: M2MType.Container
+  readonly parentAE: ApplicationEntity
+  readonly raw: M2M_CNT
+  /**
+   * Max value size (length)
+   */
+  readonly maxBufferSize: number
 }
 export interface ContentInstance extends Readonly<Resource> {
-  readonly type:M2M_Type.ContentInstance,
-  readonly container:Container,
-  readonly value:string,
+  readonly type: M2MType.ContentInstance
+  readonly raw: M2M_CIN
+  readonly container: Container
+  readonly value: string
 }
 
 export interface SubscribeData extends Readonly<Resource> {
-  readonly type:M2M_Type.Subscribe,
-  readonly container:Container,
-  readonly notiURL:string,
+  readonly type: M2MType.Subscribe
+  readonly container: Container
+  readonly raw: M2M_SUB
+  readonly notiURL: string
 }
+/**
+ * Support protocols
+ */
+type SubscribeProtos = ThymeProtocol.WebSocket | ThymeProtocol.MQTT
+export type Thyme2Option<
+  T extends ThymeProtocol,
+  V extends SubscribeProtos | void
+> = {
+  main: {
+    type: T
+    host: string
+    port: number
+    secure?: boolean
+  }
+} & (T extends SubscribeProtos
+  ? {
+      sub?: {
+        type: V
+        port: number
+        secure?: boolean
+        host?: string
+      }
+    }
+  : {
+      sub: {
+        type: V
+        port: number
+        secure?: boolean
+        host?: string
+      }
+    })
 
+export enum ThymeProtocol {
+  HTTP = "http",
+  MQTT = "mqtt",
+  WebSocket = "webSocket",
+  CoAP = "coap",
+}
+interface ThymeBase {
+  mainProtocol: M2MTransport
+  subProtocol: M2MSubTransport
+  baseM2MHeader: M2MHeader
+  connect: () => Promise<unknown>
+}
 export interface ThymeOption {
-  host:string,
-  main:"http", // @todo support mqtt main
-  http:{
-    port:number,
-    secure?:false,
-  },
-  mqtt:{
-    port:number,
+  host: string
+  main: "http" // @todo support mqtt main
+  http: {
+    port: number
+    secure?: false
+  }
+  mqtt: {
+    port: number
   }
 }
 
-interface ValueCallback {
-  readonly container:Container,
-  callback:(newValue:string) => unknown,
+/**
+ * Print name of element
+ * @param entity Entity
+ * @returns beautiful output
+ */
+function getDeclaredName(
+  entity: ApplicationEntity | Container | ContentInstance
+) {
+  if (entity.type === M2MType.ApplicationEntity) {
+    return `${Chalk.blue(entity.resourceName)}${Chalk.gray("(AE)")}`
+  } else if (entity.type === M2MType.Container) {
+    return `${Chalk.green(entity.resourceName)}${Chalk.gray(
+      "(CNT)"
+    )} in ${getDeclaredName(entity.parentAE)}`
+  } else if (entity.type === M2MType.ContentInstance) {
+    return `The value of ${getDeclaredName(entity.container)}`
+  } else {
+    return `unknown`
+  }
 }
 
-interface ResponsePair<T> {
-  statusCode: number,
-  response: T,
-}
-
-enum PostType {
-  POST = "POST",
-  GET = "GET",
-  DELETE = "DELETE"
+function serialGeneral<T extends M2MBase>(resp: T) {
+  return {
+    createdTime: convertM2MTimestamp(resp.ct),
+    modifiedTime: convertM2MTimestamp(resp.lt),
+    resourceName: resp.rn,
+    resourceId: resp.ri,
+    raw: resp,
+  }
 }

@@ -1,27 +1,23 @@
-import { Thyme } from "./index"
+import { Thyme, ThymeProtocol } from "./index"
 
-async function main() {
-  const thyme = new Thyme("Mobius", {
-    host: "203.253.128.177",
-    main: "http",
-    http: {
+async function main2() {
+  const thyme2 = new Thyme({
+    main: {
+      type: ThymeProtocol.HTTP,
+      host: "203.253.128.177",
       port: 7579,
-      secure: false,
     },
-    mqtt: {
+    sub: {
+      type: ThymeProtocol.MQTT,
       port: 1883,
-    }
-  });
-  await thyme.connect()
-  // create Application Entity
-  const myAE = await thyme.ensureApplicationEntity("ncube_nodejs_sample", true)
-  // create Container
-  const led1 = await thyme.ensureContainer(myAE, "led1", true)
-  const led2 = await thyme.ensureContainer(myAE, "led2", true)
-  await thyme.subscribeContainer(led1, "test1sub")
-  await thyme.subscribeContainer(led2, "test2sub")
-  await thyme.addContentInstance(led1, "120")
-  await thyme.addContentInstance(led2, "120")
+    },
+  })
+  await thyme2.connect()
+  const mobius = await thyme2.getCSEBase("Mobius")
+  const myAE = await mobius.ensureApplicationEntity("ncube_nodejs_sample", true)
+  const led1 = await myAE.ensureContainer("led1", 16384, true)
+  await led1.addContentInstance("123")
+  console.log("Sensor: " + (await led1.queryLastValue()))
 }
 
-main()
+main2()
