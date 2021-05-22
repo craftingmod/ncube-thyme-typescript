@@ -17,6 +17,7 @@ import {
   M2MTransport,
   MQTTTransport,
 } from "./onem2m/m2m_protocol"
+import { M2MStatusCode } from "./onem2m/m2m_rsp"
 import { M2M_SUB, M2M_SUBRes } from "./onem2m/m2m_sub"
 import { M2MType } from "./onem2m/m2m_type"
 
@@ -88,10 +89,23 @@ export class Thyme<M extends ThymeProtocol, S extends SubscribeProtos>
       }
     }
   }
-  public async getCSEBase(cseName: string) {
+  /**
+   * Get CommonServiceEntity Instance.
+   *
+   * `cseId` is required for mqtt protocol!
+   * @param cseName
+   * @param cseId
+   * @returns
+   */
+  public async getCSEBase(cseName: string, cseId?: string) {
     const cseBaseRes = await this.mainProtocol.request<M2M_CBRes>({
       opcode: M2MOperation.RETRIEVE,
-      params: [cseName],
+      rootCSE: {
+        name: cseName,
+        id: cseId ?? "",
+      },
+      params: [],
+      useReg: true,
       header: {
         ...this.baseM2MHeader,
         "X-M2M-Origin": `S`,
@@ -116,6 +130,7 @@ export class ThymeCSE implements CSEBase, ThymeBase {
   public readonly resourceName: string
   public readonly resourceId: string
   public readonly cseName: string
+  public readonly cseId: string
   public readonly raw: M2M_CB
 
   protected pointOfAccess: string[] = []
@@ -134,6 +149,7 @@ export class ThymeCSE implements CSEBase, ThymeBase {
     this.resourceName = resp.rn
     this.resourceId = resp.ri
     this.cseName = this.resourceName
+    this.cseId = resp.csi.startsWith("/") ? resp.csi.substring(1) : resp.csi
     this.pointOfAccess.push(...resp.poa)
   }
   public async connect() {
@@ -152,11 +168,15 @@ export class ThymeCSE implements CSEBase, ThymeBase {
   public async createApplicationEntity(resourceName: string) {
     const createAERes = await this.mainProtocol.request<M2M_AERes>({
       opcode: M2MOperation.CREATE,
-      params: [this.cseName],
+      resType: M2MType.ApplicationEntity,
+      rootCSE: {
+        name: this.cseName,
+        id: this.cseId,
+      },
+      params: [],
       header: {
         ...this.baseM2MHeader,
-        "X-M2M-Origin": `S`,
-        "Content-Type": genContentType(M2MType.ApplicationEntity),
+        "X-M2M-Origin": `S${resourceName}`,
       },
       body: {
         "m2m:ae": {
@@ -189,12 +209,17 @@ export class ThymeCSE implements CSEBase, ThymeBase {
   ): Promise<ApplicationEntity> {
     const resName =
       typeof resource === "string" ? resource : resource.resourceName
+    // const aeInfo = await this.queryApplicationEntity(resName)
     const deleteAERes = await this.mainProtocol.request<M2M_AERes>({
       opcode: M2MOperation.DELETE,
-      params: [this.cseName, resName],
+      rootCSE: {
+        name: this.cseName,
+        id: this.cseId,
+      },
+      params: [resName],
       header: {
         ...this.baseM2MHeader,
-        "X-M2M-Origin": `Superman`,
+        "X-M2M-Origin": "Superman",
       },
     })
     const response = deleteAERes.response[M2MKeys.applicationEntity]
@@ -217,7 +242,11 @@ export class ThymeCSE implements CSEBase, ThymeBase {
   ): Promise<ApplicationEntity> {
     const queryAERes = await this.mainProtocol.request<M2M_AERes>({
       opcode: M2MOperation.RETRIEVE,
-      params: [this.cseName, resourceName],
+      rootCSE: {
+        name: this.cseName,
+        id: this.cseId,
+      },
+      params: [resourceName],
       header: {
         ...this.baseM2MHeader,
         "X-M2M-Origin": `S${resourceName}`,
@@ -241,7 +270,7 @@ export class ThymeCSE implements CSEBase, ThymeBase {
       ae = await this.queryApplicationEntity(resourceName)
     } catch (err: unknown) {
       if (err instanceof M2MError) {
-        if (err.responseCode === 404) {
+        if (err.responseCode === M2MStatusCode.NOT_FOUND) {
           // pass
         } else {
           throw err
@@ -336,11 +365,15 @@ export class ThymeAE implements ApplicationEntity, ThymeBase {
   ): Promise<Container> {
     const createCntRes = await this.mainProtocol.request<M2M_CNTRes>({
       opcode: M2MOperation.CREATE,
-      params: [this.parentCSE.cseName, this.resourceName],
+      resType: M2MType.Container,
+      rootCSE: {
+        name: this.parentCSE.cseName,
+        id: this.parentCSE.cseId,
+      },
+      params: [this.resourceName],
       header: {
         ...this.baseM2MHeader,
         "X-M2M-Origin": this.aei,
-        "Content-Type": genContentType(M2MType.Container),
       },
       body: {
         "m2m:cnt": {
@@ -370,7 +403,11 @@ export class ThymeAE implements ApplicationEntity, ThymeBase {
       typeof container === "string" ? container : container.resourceName
     const deleteCntRes = await this.mainProtocol.request<M2M_CNTRes>({
       opcode: M2MOperation.DELETE,
-      params: [this.parentCSE.cseName, this.resourceName, conName],
+      rootCSE: {
+        name: this.parentCSE.cseName,
+        id: this.parentCSE.cseId,
+      },
+      params: [this.resourceName, conName],
       header: {
         ...this.baseM2MHeader,
         "X-M2M-Origin": this.aei,
@@ -390,7 +427,11 @@ export class ThymeAE implements ApplicationEntity, ThymeBase {
   public async queryContainer(containerName: string): Promise<Container> {
     const queryCntRes = await this.mainProtocol.request<M2M_AERes>({
       opcode: M2MOperation.RETRIEVE,
-      params: [this.parentCSE.cseName, this.resourceName, containerName],
+      rootCSE: {
+        name: this.parentCSE.cseName,
+        id: this.parentCSE.cseId,
+      },
+      params: [this.resourceName, containerName],
       header: {
         ...this.baseM2MHeader,
         "X-M2M-Origin": `S${this.resourceName}`,
@@ -416,7 +457,7 @@ export class ThymeAE implements ApplicationEntity, ThymeBase {
       container = await this.queryContainer(containerName)
     } catch (err: unknown) {
       if (err instanceof M2MError) {
-        if (err.responseCode === 404) {
+        if (err.responseCode === M2MStatusCode.NOT_FOUND) {
           // pass
         } else {
           throw err
@@ -505,11 +546,15 @@ export class ThymeContainer implements Container, ThymeBase {
     const ae = this.parentAE
     const createCinRes = await this.mainProtocol.request<M2M_CINRes>({
       opcode: M2MOperation.CREATE,
-      params: [ae.parentCSE.cseName, ae.resourceName, this.resourceName],
+      resType: M2MType.ContentInstance,
+      rootCSE: {
+        name: ae.parentCSE.cseName,
+        id: ae.parentCSE.cseId,
+      },
+      params: [ae.resourceName, this.resourceName],
       header: {
         ...this.baseM2MHeader,
         "X-M2M-Origin": ae.aei,
-        "Content-Type": genContentType(M2MType.ContentInstance),
       },
       body: {
         "m2m:cin": {
@@ -538,7 +583,7 @@ export class ThymeContainer implements Container, ThymeBase {
       return data[0].value
     } catch (err: unknown) {
       if (err instanceof M2MError) {
-        if (err.responseCode === 404) {
+        if (err.responseCode === M2MStatusCode.NOT_FOUND) {
           // pass
         } else {
           throw err
@@ -567,7 +612,11 @@ export class ThymeContainer implements Container, ThymeBase {
       "m2m:rsp": { "m2m:cin": M2M_CIN[] }
     }>({
       opcode: M2MOperation.RETRIEVE,
-      params: [ae.parentCSE.cseName, ae.resourceName, this.resourceName],
+      rootCSE: {
+        name: ae.parentCSE.cseName,
+        id: ae.parentCSE.cseId,
+      },
+      params: [ae.resourceName, this.resourceName],
       header: {
         ...this.baseM2MHeader,
         "X-M2M-Origin": `S${ae.resourceName}`,
@@ -603,12 +652,11 @@ export class ThymeContainer implements Container, ThymeBase {
     try {
       const subExistRes = await this.mainProtocol.request<M2M_SUBRes>({
         opcode: M2MOperation.RETRIEVE,
-        params: [
-          ae.parentCSE.cseName,
-          ae.resourceName,
-          this.resourceName,
-          subscribeName,
-        ],
+        rootCSE: {
+          name: ae.parentCSE.cseName,
+          id: ae.parentCSE.cseId,
+        },
+        params: [ae.resourceName, this.resourceName, subscribeName],
         header: {
           ...this.baseM2MHeader,
           "X-M2M-Origin": `S${ae.resourceName}`,
@@ -619,11 +667,15 @@ export class ThymeContainer implements Container, ThymeBase {
       if (err instanceof M2MError && err.debugLog === resNotExists) {
         const createSubRes = await this.mainProtocol.request<M2M_SUBRes>({
           opcode: M2MOperation.CREATE,
-          params: [ae.parentCSE.cseName, ae.resourceName, this.resourceName],
+          resType: M2MType.Subscribe,
+          rootCSE: {
+            name: ae.parentCSE.cseName,
+            id: ae.parentCSE.cseId,
+          },
+          params: [ae.resourceName, this.resourceName],
           header: {
             ...this.baseM2MHeader,
             "X-M2M-Origin": `S${ae.resourceName}`,
-            "Content-Type": genContentType(M2MType.Subscribe),
           },
           body: {
             "m2m:sub": {
@@ -661,12 +713,11 @@ export class ThymeContainer implements Container, ThymeBase {
     const ae = this.parentAE
     const deleteCntRes = await this.mainProtocol.request<M2M_SUBRes>({
       opcode: M2MOperation.DELETE,
-      params: [
-        ae.parentCSE.cseName,
-        ae.resourceName,
-        this.resourceName,
-        subscribeName,
-      ],
+      rootCSE: {
+        name: ae.parentCSE.cseName,
+        id: ae.parentCSE.cseId,
+      },
+      params: [ae.resourceName, this.resourceName, subscribeName],
       header: {
         ...this.baseM2MHeader,
         "X-M2M-Origin": `S${ae.resourceName}`,
@@ -696,10 +747,6 @@ export class ThymeContainer implements Container, ThymeBase {
   }
 }
 
-function genContentType(type: M2MType) {
-  return `application/vnd.onem2m-res+json;ty=${type}`
-}
-
 interface Resource {
   readonly type: M2MType
   readonly resourceName: string
@@ -713,6 +760,7 @@ export interface CSEBase extends Readonly<Resource> {
   readonly raw: M2M_CB
 
   readonly cseName: string
+  readonly cseId: string // for mqtt
 }
 export interface ApplicationEntity extends Readonly<Resource> {
   readonly type: M2MType.ApplicationEntity
