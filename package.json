@@ -1,6 +1,6 @@
 {
   "name": "ncube-thyme-typescript",
-  "version": "1.1.0-alpha2",
+  "version": "1.1.1",
   "description": "nCube Thyme for Typescript (oneM2M client)",
   "main": "dist/index.js",
   "typings": "dist/index.d.ts",
@@ -55,7 +55,8 @@
     "json-colorizer": "^2.2.2",
     "mqtt": "^4.2.6",
     "query-string": "^7.0.0",
-    "shortid": "^2.2.16"
+    "shortid": "^2.2.16",
+    "tiny-typed-emitter": "^2.0.3"
   },
   "devDependencies": {
     "@ava/typescript": "^1.1.1",

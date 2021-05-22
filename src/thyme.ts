@@ -1,6 +1,7 @@
 import Chalk from "chalk"
 import Debug from "debug"
 import shortid from "shortid"
+import { TypedEmitter } from "tiny-typed-emitter"
 
 import { M2M_AE, M2M_AERes } from "./onem2m/m2m_ae"
 import { convertM2MTimestamp, M2MBase, M2MError } from "./onem2m/m2m_base"
@@ -9,6 +10,7 @@ import { M2M_CIN, M2M_CINRes } from "./onem2m/m2m_cin"
 import { M2M_CNT, M2M_CNTRes } from "./onem2m/m2m_cnt"
 import { resNotExists } from "./onem2m/m2m_debug"
 import {
+  CINSubCallback,
   HTTPTransport,
   M2MHeader,
   M2MKeys,
@@ -36,14 +38,14 @@ const m2m_ae_basebody = {
 export class Thyme<M extends ThymeProtocol, S extends SubscribeProtos>
   implements ThymeBase
 {
-  protected mainProtoName: ThymeProtocol
-  protected subProtoName: ThymeProtocol
+  protected mainProtoName: M
+  protected subProtoName: S
   public mainProtocol: M2MTransport
   public subProtocol: M2MSubTransport
   public baseM2MHeader: M2MHeader
   public constructor(options: Thyme2Option<M, S>) {
     this.mainProtoName = options.main.type
-    this.subProtoName = options.sub?.type ?? this.mainProtoName
+    this.subProtoName = (options.sub?.type ?? this.mainProtoName) as S
     this.baseM2MHeader = {
       "X-M2M-RI": `thyme/${shortid()}`,
     }
@@ -69,9 +71,9 @@ export class Thyme<M extends ThymeProtocol, S extends SubscribeProtos>
     }
     this.mainProtocol = getProto("main")
     if (options.sub == null) {
-      this.subProtocol = this.mainProtocol
+      this.subProtocol = this.mainProtocol as M2MSubTransport
     } else {
-      this.subProtocol = getProto("sub")
+      this.subProtocol = getProto("sub") as M2MSubTransport
     }
   }
   public async connect() {
@@ -495,12 +497,19 @@ export class ThymeAE implements ApplicationEntity, ThymeBase {
   }
 }
 
+interface ThymeContainerEvents {
+  changed: (value: string, cin: ContentInstance) => unknown
+}
+
 /**
  * Container
  *
  * or sensor value store?
  */
-export class ThymeContainer implements Container, ThymeBase {
+export class ThymeContainer
+  extends TypedEmitter<ThymeContainerEvents>
+  implements Container, ThymeBase
+{
   /* predefine */
   public readonly type = M2MType.Container
   public readonly resourceName: string
@@ -517,6 +526,7 @@ export class ThymeContainer implements Container, ThymeBase {
   public readonly maxBufferSize: number
 
   public constructor(parentAE: ThymeAE, container: Container) {
+    super()
     this.resourceName = container.resourceName
     this.resourceId = container.resourceId
     this.createdTime = container.createdTime
@@ -533,6 +543,13 @@ export class ThymeContainer implements Container, ThymeBase {
     this.maxBufferSize = container.maxBufferSize
   }
   public async connect() {
+    await this.subscribe("thyme_cin_sub", (raw: M2M_CIN) => {
+      const cin = this.respToSerial(raw)
+      debugSub(
+        `${getDeclaredName(cin)} has changed to ${Chalk.blueBright(cin.value)}.`
+      )
+      this.emit("changed", cin.value, cin)
+    })
     return true
   }
   /**
@@ -646,7 +663,10 @@ export class ThymeContainer implements Container, ThymeBase {
    * @param subscribeName subscribe name
    * @returns subscribe data?
    */
-  public async subscribe(subscribeName: string): Promise<SubscribeData> {
+  public async subscribe(
+    subscribeName: string,
+    callback: CINSubCallback
+  ): Promise<SubscribeData> {
     const ae = this.parentAE
     let response: M2M_SUB
     try {
@@ -695,8 +715,11 @@ export class ThymeContainer implements Container, ThymeBase {
         throw err
       }
     }
-    // code
-    debugSub(`${getDeclaredName(this)} is ${Chalk.greenBright("subscribed")}.`)
+    // also subscribe from subscribe protocol
+    await this.subProtocol.subscribeContainer(this, subscribeName, callback)
+    debugSub(
+      `${getDeclaredName(this)} is now ${Chalk.greenBright("subscribed")}.`
+    )
     return {
       type: M2MType.Subscribe,
       ...serialGeneral(response),
@@ -706,10 +729,7 @@ export class ThymeContainer implements Container, ThymeBase {
     }
   }
 
-  public async unsubscribeContainer(
-    container: Container,
-    subscribeName: string
-  ): Promise<SubscribeData> {
+  public async unsubscribe(subscribeName: string): Promise<SubscribeData> {
     const ae = this.parentAE
     const deleteCntRes = await this.mainProtocol.request<M2M_SUBRes>({
       opcode: M2MOperation.DELETE,
@@ -724,14 +744,16 @@ export class ThymeContainer implements Container, ThymeBase {
       },
     })
     const response = deleteCntRes.response[M2MKeys.subscribe]
+    // also unsubscribe from protocol
+    await this.subProtocol.unsubscribeContainer(this, subscribeName)
     debugSub(
-      `${getDeclaredName(container)} is ${Chalk.redBright("unsubscribed")}.`
+      `${getDeclaredName(this)} is now ${Chalk.redBright("unsubscribed")}.`
     )
     return {
       type: M2MType.Subscribe,
       ...serialGeneral(response),
       raw: response,
-      container,
+      container: this,
       notiURL: response.nu[0],
     }
   }
@@ -748,11 +770,11 @@ export class ThymeContainer implements Container, ThymeBase {
 }
 
 interface Resource {
-  readonly type: M2MType
-  readonly resourceName: string
-  readonly resourceId: string
-  readonly createdTime: Date
-  readonly modifiedTime: Date
+  type: M2MType
+  resourceName: string
+  resourceId: string
+  createdTime: Date
+  modifiedTime: Date
 }
 
 export interface CSEBase extends Readonly<Resource> {

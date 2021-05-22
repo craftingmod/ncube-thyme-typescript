@@ -6,7 +6,10 @@ import mqtt from "mqtt"
 import queryString from "query-string"
 import shortid from "shortid"
 
+import { Container } from "../thyme"
+
 import { M2MError } from "./m2m_base"
+import { M2M_CIN, M2M_CINRes } from "./m2m_cin"
 import { M2M_RSP, M2MStatusCode } from "./m2m_rsp"
 import { M2MType } from "./m2m_type"
 
@@ -30,11 +33,23 @@ export abstract class M2MTransport {
   public abstract request<T>(options: RequestOptions): Promise<ResponsePair<T>>
 }
 
-export abstract class M2MSubTransport extends M2MTransport {}
+export type CINSubCallback = (contentInstance: M2M_CIN) => unknown
+export abstract class M2MSubTransport extends M2MTransport {
+  protected cinCallbacks: Map<string, Array<CINSubCallback>> = new Map()
+  public abstract subscribeContainer(
+    container: Container,
+    subName: string,
+    callback: CINSubCallback
+  ): Promise<void>
+  public abstract unsubscribeContainer(
+    container: Container,
+    subName: string
+  ): Promise<void>
+}
 /**
  * HTTP Transport
  */
-const debugHttp = debug("Thyme_m2m:http")
+const debugHttp = debug("Thyme_socket:http")
 export class HTTPTransport extends M2MTransport {
   public constructor(_host: string, _port: number, _secure?: boolean) {
     super(_host, _port, _secure)
@@ -150,7 +165,7 @@ export class HTTPTransport extends M2MTransport {
   }
 }
 
-const debugMqtt = debug("Thyme_m2m:mqtt")
+const debugMqtt = debug("Thyme_socket:mqtt")
 /**
  * MQTT Transport
  *
@@ -158,6 +173,7 @@ const debugMqtt = debug("Thyme_m2m:mqtt")
  */
 export class MQTTTransport extends M2MSubTransport {
   protected client: mqtt.Client
+  protected subTopics: Map<string, number> = new Map()
   public constructor(_host: string, _port: number, _secure?: boolean) {
     super(_host, _port, _secure)
     this.urlHeader = `mqtt${this.secure ? "s" : ""}`
@@ -176,6 +192,8 @@ export class MQTTTransport extends M2MSubTransport {
         res()
       })
     })
+    this.client.on("message", this.handleMessage.bind(this))
+    /*
     this.client.subscribe("/oneM2M/req/+")
     this.client.subscribe("/oneM2M/resp/+")
     this.client.on("message", (topic, message) => {
@@ -185,8 +203,93 @@ export class MQTTTransport extends M2MSubTransport {
         )}: ${message.toString("utf8")}`
       )
     })
+    */
     // todo
     return true
+  }
+  protected async handleMessage(topic: string, buf: Buffer) {
+    if (!this.subTopics.has(topic)) {
+      // request topics
+      return
+    }
+    const message = JSON.parse(buf.toString("utf8")) as {
+      op: M2MOperation // opcode
+      rqi: string // unique id
+      to: string // virtual address?
+      fr: string // almost cse
+      pc: {
+        "m2m:sgn": {
+          sur: string // subscribed URL
+          nev: {
+            rep: unknown // response
+          }
+        }
+      }
+    }
+    const uri = message.pc["m2m:sgn"].sur
+    if (this.cinCallbacks.has(uri)) {
+      // cin handle
+      const resp = message.pc["m2m:sgn"].nev.rep as M2M_CINRes
+      if (resp["m2m:cin"] == null) {
+        return
+      }
+      for (const callback of this.cinCallbacks.get(uri)) {
+        callback(resp["m2m:cin"])
+      }
+    }
+  }
+  public async subscribeContainer(
+    container: Container,
+    subName: string,
+    callback: CINSubCallback
+  ) {
+    // 1. subscribe receiver
+    const topicName = `/oneM2M/req/${container.parentAE.parentCSE.cseId}/${container.parentAE.aei}/json`
+    if (!this.subTopics.has(topicName)) {
+      this.client.subscribe(topicName)
+      this.subTopics.set(topicName, 1)
+    } else {
+      this.subTopics.set(topicName, this.subTopics.get(topicName) + 1)
+    }
+    // 2. add callback
+    const resourceURI = `${container.parentAE.parentCSE.cseName}/${container.parentAE.resourceName}/${container.resourceName}/${subName}`
+    if (!this.cinCallbacks.has(resourceURI)) {
+      this.cinCallbacks.set(resourceURI, [])
+    }
+    this.cinCallbacks.get(resourceURI).push(callback)
+  }
+  public async unsubscribeContainer(
+    container: Container,
+    subName: string,
+    callback?: CINSubCallback
+  ) {
+    const topicName = `/oneM2M/req/${container.parentAE.parentCSE.cseId}/${container.parentAE.aei}/json`
+    // 1. unsubscribe receiver
+    if (this.subTopics.has(topicName)) {
+      const subs = this.subTopics.get(topicName)
+      if (subs <= 1) {
+        this.client.unsubscribe(topicName)
+        this.subTopics.delete(topicName)
+      } else {
+        this.subTopics.set(topicName, subs - 1)
+      }
+    }
+    // 2. remove callback
+    const resourceURI = `${container.parentAE.parentCSE.cseName}/${container.parentAE.resourceName}/${container.resourceName}/${subName}`
+    if (this.cinCallbacks.has(resourceURI)) {
+      if (callback == null) {
+        this.cinCallbacks.delete(resourceURI)
+      } else {
+        const callbacks = this.cinCallbacks.get(resourceURI)
+        const index = callbacks.indexOf(callback)
+        if (index >= 0) {
+          callbacks.splice(index, 1)
+        }
+        if (callbacks.length <= 0) {
+          this.cinCallbacks.delete(resourceURI)
+        }
+      }
+    }
   }
   public async request<T>(options: RequestOptions): Promise<ResponsePair<T>> {
     const destinations = options.params.map((s) => s.replace(/\//gi, ":")) // except CSEBase
