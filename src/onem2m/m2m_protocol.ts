@@ -156,7 +156,7 @@ export class HTTPTransport extends M2MTransport {
     )} ${colorJson(JSON.stringify(resBody))}`
     debugHttp(debugMsg)
     if (errorMsg != null) {
-      throw new M2MError(errorMsg, response.statusCode)
+      throw new M2MError(errorMsg, statusCode)
     }
     return {
       statusCode,

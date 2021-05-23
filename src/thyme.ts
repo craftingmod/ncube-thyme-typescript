@@ -591,13 +591,26 @@ export class ThymeContainer
   /**
    * Get latest value of data
    *
-   * If data isn't presented, It will return `""`
+   * If data isn't presented, It will return `null`
    * @returns string value(sensor data)
    */
   public async queryLastValue() {
     try {
-      const data = await this.queryContentInstance({ latest: 1 })
-      return data[0].value
+      const ae = this.parentAE
+      const queryCinRes = await this.mainProtocol.request<M2M_CINRes>({
+        opcode: M2MOperation.RETRIEVE,
+        rootCSE: {
+          name: ae.parentCSE.cseName,
+          id: ae.parentCSE.cseId,
+        },
+        params: [ae.resourceName, this.resourceName, "la"],
+        header: {
+          ...this.baseM2MHeader,
+          "X-M2M-Origin": `S${ae.resourceName}`,
+        },
+      })
+      const value = queryCinRes.response["m2m:cin"].con
+      return value
     } catch (err: unknown) {
       if (err instanceof M2MError) {
         if (err.responseCode === M2MStatusCode.NOT_FOUND) {
@@ -609,7 +622,7 @@ export class ThymeContainer
         throw err
       }
     }
-    return ""
+    return null
   }
   /**
    * Query ContentInstance
