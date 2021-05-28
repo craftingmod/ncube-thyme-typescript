@@ -436,7 +436,7 @@ export class ThymeAE implements ApplicationEntity, ThymeBase {
       params: [this.resourceName, containerName],
       header: {
         ...this.baseM2MHeader,
-        "X-M2M-Origin": `S${this.resourceName}`,
+        "X-M2M-Origin": this.aei,
       },
     })
     const response = queryCntRes.response[M2MKeys.container]
@@ -606,7 +606,7 @@ export class ThymeContainer
         params: [ae.resourceName, this.resourceName, "la"],
         header: {
           ...this.baseM2MHeader,
-          "X-M2M-Origin": `S${ae.resourceName}`,
+          "X-M2M-Origin": ae.aei,
         },
       })
       const value = queryCinRes.response["m2m:cin"].con
@@ -649,7 +649,7 @@ export class ThymeContainer
       params: [ae.resourceName, this.resourceName],
       header: {
         ...this.baseM2MHeader,
-        "X-M2M-Origin": `S${ae.resourceName}`,
+        "X-M2M-Origin": ae.aei,
       },
       urlOptions: {
         ty: M2MType.ContentInstance, // resource type
@@ -692,7 +692,7 @@ export class ThymeContainer
         params: [ae.resourceName, this.resourceName, subscribeName],
         header: {
           ...this.baseM2MHeader,
-          "X-M2M-Origin": `S${ae.resourceName}`,
+          "X-M2M-Origin": ae.aei,
         },
       })
       response = subExistRes.response[M2MKeys.subscribe]
@@ -708,7 +708,7 @@ export class ThymeContainer
           params: [ae.resourceName, this.resourceName],
           header: {
             ...this.baseM2MHeader,
-            "X-M2M-Origin": `S${ae.resourceName}`,
+            "X-M2M-Origin": ae.aei,
           },
           body: {
             "m2m:sub": {
@@ -753,7 +753,7 @@ export class ThymeContainer
       params: [ae.resourceName, this.resourceName, subscribeName],
       header: {
         ...this.baseM2MHeader,
-        "X-M2M-Origin": `S${ae.resourceName}`,
+        "X-M2M-Origin": ae.aei,
       },
     })
     const response = deleteCntRes.response[M2MKeys.subscribe]

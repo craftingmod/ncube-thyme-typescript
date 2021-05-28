@@ -14,7 +14,7 @@
       // "internalConsoleOptions": "openOnSessionStart",
       // "outputCapture": "std",
       "env": {
-        "DEBUG": "Thyme_main*"
+        "DEBUG": "Thyme*"
       }
     },
     // To debug, make sure a *.spec.ts file is active in the editor, then run a configuration
