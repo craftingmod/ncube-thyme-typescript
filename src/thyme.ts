@@ -716,9 +716,7 @@ export class ThymeContainer
               enc: {
                 net: [1, 2, 3, 4],
               },
-              nu: [
-                `${this.subProtocol.getBaseURL()}/S${ae.resourceName}?ct=json`,
-              ],
+              nu: [`${this.subProtocol.getBaseURL()}/${ae.aei}?ct=json`],
               exc: 10,
             },
           },
